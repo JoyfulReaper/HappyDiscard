@@ -5,9 +5,9 @@
  */
 
 using HappyDiscard;
+using JoyfulReaperLib.MissionControl;
 
 var builder = Host.CreateApplicationBuilder(args);
-builder.Services.AddHostedService<DiscardWorker>();
 
 builder.Services.AddWindowsService(options =>
 {
@@ -22,6 +22,12 @@ builder.Services
     .Validate(options => options.MaxConcurrentConnections > 0, "Discard:MaxConcurrentConnections must be positive.")
     .Validate(options => options.RequestTimeoutSeconds > 0, "Discard:RequestTimeoutSeconds must be positive.")
     .ValidateOnStart();
+
+builder.Services.AddMissionControlClient(
+    builder.Configuration.GetSection(
+        MissionControlClientOptions.SectionName));
+
+builder.Services.AddHostedService<DiscardWorker>();
 
 var host = builder.Build();
 host.Run();
