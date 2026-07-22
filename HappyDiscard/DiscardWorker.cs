@@ -119,6 +119,14 @@ public class DiscardWorker(
                 _ = task.ContinueWith(ct =>
                 {
                     _activeConnections.TryRemove(connectionId, out _);
+
+                    if (ct.IsFaulted)
+                    {
+                        logger.LogError(
+                            ct.Exception,
+                            "Connection {ConnectionId} handler failed unexpectedly.",
+                            connectionId);
+                    }
                 },
                 CancellationToken.None,
                 TaskContinuationOptions.ExecuteSynchronously,
