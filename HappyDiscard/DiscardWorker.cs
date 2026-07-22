@@ -84,43 +84,46 @@ public class DiscardWorker(
 
         try
         {
-            TcpClient client = await _listener.AcceptTcpClientAsync(stoppingToken);
             while (!_stopRequested && !stoppingToken.IsCancellationRequested)
             {
+                TcpClient? client = null;
+
                 try
                 {
                     client = await _listener.AcceptTcpClientAsync(stoppingToken);
-                }
-                catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
-                {
-                    break;
-                }
-                catch (SocketException) when (stoppingToken.IsCancellationRequested || _stopRequested)
-                {
-                    break;
-                }
-                try
-                {
                     await _connectionLimit.WaitAsync(stoppingToken);
                 }
                 catch (OperationCanceledException)
+                    when (stoppingToken.IsCancellationRequested || _stopRequested)
                 {
-                    client.Dispose();
+                    client?.Dispose();
                     break;
                 }
+                catch (SocketException)
+                    when (stoppingToken.IsCancellationRequested || _stopRequested)
+                {
+                    client?.Dispose();
+                    break;
+                }
+                catch (ObjectDisposedException)
+                    when (stoppingToken.IsCancellationRequested || _stopRequested)
+                {
+                    client?.Dispose();
+                    break;
+                }
+
+                long connectionId = Interlocked.Increment(ref _nextConnectionId);
+                Task task = HandleClientAsync(connectionId, client, stoppingToken);
+                _activeConnections[connectionId] = task;
+
+                _ = task.ContinueWith(ct =>
+                {
+                    _activeConnections.TryRemove(connectionId, out _);
+                },
+                CancellationToken.None,
+                TaskContinuationOptions.ExecuteSynchronously,
+                TaskScheduler.Default);
             }
-
-            long connectionId = Interlocked.Increment(ref _nextConnectionId);
-            Task task = HandleClientAsync(connectionId, client, stoppingToken);
-            _activeConnections[connectionId] = task;
-
-            _ = task.ContinueWith(ct =>
-            {
-                _activeConnections.TryRemove(connectionId, out _);
-            },
-            CancellationToken.None,
-            TaskContinuationOptions.ExecuteSynchronously,
-            TaskScheduler.Default);
         }
         finally
         {
@@ -216,6 +219,30 @@ public class DiscardWorker(
                         remote);
                 }
             }
+            if (startedTelemetryTask is not null)
+            {
+                try
+                {
+                    await startedTelemetryTask;
+                }
+                catch (OperationCanceledException)
+                    when (stoppingToken.IsCancellationRequested)
+                {
+                    logger.LogDebug(
+                        "Discard-started telemetry was cancelled during shutdown.");
+                }
+                catch (OperationCanceledException)
+                {
+                    logger.LogWarning(
+                        "Discard-started telemetry timed out.");
+                }
+                catch (Exception exception)
+                {
+                    logger.LogWarning(
+                        exception,
+                        "Failed to publish discard-started telemetry.");
+                }
+            }
         }
         finally
         {
@@ -233,21 +260,6 @@ public class DiscardWorker(
     DiscardSessionTelemetryResult result,
     CancellationToken stoppingToken)
     {
-        if (!result.ShouldPublish)
-        {
-            return;
-        }
-
-        if (result.ShouldPublish)
-        {
-            logger.LogDebug(
-                "Skipping telemetry for health-check connection {ConnectionId} from {Remote}.",
-                connectionId,
-                result.Remote);
-
-            return;
-        }
-
         using var timeout = CancellationTokenSource.CreateLinkedTokenSource(stoppingToken);
         timeout.CancelAfter(TimeSpan.FromSeconds(2));
 
@@ -381,7 +393,6 @@ public class DiscardWorker(
             stopwatch.ElapsedMilliseconds,
             outcome,
             succeeded,
-            !isIgnoredTelemetrySource,
             OccurredAt: DateTimeOffset.UtcNow,
             correlationId);
     }
@@ -490,7 +501,6 @@ public class DiscardWorker(
         long DurationMilliseconds,
         string Outcome,
         bool Succeeded,
-        bool ShouldPublish,
         DateTimeOffset OccurredAt,
         string CorrelationId);
 }

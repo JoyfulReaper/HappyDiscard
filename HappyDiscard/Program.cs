@@ -21,6 +21,7 @@ builder.Services
     .Validate(options => options.Port is > 0 and <= 65535, "Discard:Port must be between 1 and 65535.")
     .Validate(options => options.MaxConcurrentConnections > 0, "Discard:MaxConcurrentConnections must be positive.")
     .Validate(options => options.RequestTimeoutSeconds > 0, "Discard:RequestTimeoutSeconds must be positive.")
+    .Validate(options => options.MaxBytesPerConnection > 0, "Discard:MaxBytesPerConnection must be positive.")
     .ValidateOnStart();
 
 builder.Services.AddMissionControlClient(
