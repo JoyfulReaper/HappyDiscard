@@ -2,7 +2,6 @@ using HappyDiscard.Events;
 using JoyfulReaperLib.MissionControl;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
-using System.Diagnostics;
 using System.Net;
 using System.Net.Sockets;
 using System.Text.Json.Serialization.Metadata;
