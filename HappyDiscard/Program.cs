@@ -26,17 +26,13 @@ builder.Services
     .ValidateOnStart();
 
 builder.Services.AddMissionControlClient(
-    builder.Configuration.GetSection(
-        MissionControlClientOptions.SectionName));
+    builder.Configuration.GetSection(MissionControlClientOptions.SectionName));
 
 builder.Services
-    .AddTcpServer<
-        DiscardConnectionHandler,
-        HappyDiscardOptions>();
+    .AddTcpServer<DiscardConnectionHandler, HappyDiscardOptions>();
 
 builder.Services
-    .AddHostedService<
-        DiscardLifecycleService>();
+    .AddHostedService<DiscardLifecycleService>();
 
 var host = builder.Build();
 host.Run();

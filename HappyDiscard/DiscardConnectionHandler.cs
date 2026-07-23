@@ -1,4 +1,4 @@
-﻿/*
+/*
  * Happy Discard Service
  * Copyright (c) 2026 Kyle Givler
  * Licensed under the MIT License.
@@ -16,85 +16,59 @@ using System.Net.Sockets;
 namespace HappyDiscard;
 
 /// <summary>
-/// Processes Discard protocol connections and publishes
-/// connection-level telemetry.
+/// Processes Discard protocol connections and publishes connection-level telemetry.
 /// </summary>
 public sealed class DiscardConnectionHandler(
     ILogger<DiscardConnectionHandler> logger,
     IMissionControlClient missionControlClient,
     IOptions<HappyDiscardOptions> options) : ITcpConnectionHandler
 {
-    private static readonly TimeSpan TelemetryPublishTimeout =
-        TimeSpan.FromSeconds(2); // TODO: make configurable
+    private static readonly TimeSpan TelemetryPublishTimeout = TimeSpan.FromSeconds(2); // TODO: make configurable
 
     /// <inheritdoc />
-    public async ValueTask HandleAsync(
-        TcpConnectionContext context,
-        CancellationToken cancellationToken)
+    public async ValueTask HandleAsync(TcpConnectionContext context, CancellationToken cancellationToken)
     {
         EndPoint? remote = context.RemoteEndPoint;
 
         if (IsIgnoredTelemetrySource(remote))
         {
-            logger.LogDebug(
-                "Skipping telemetry for monitoring connection from {Remote}.",
-                remote);
-
-            _ = await ProcessAsync(
-                context.Stream,
-                remote,
-                options.Value,
-                logger,
-                cancellationToken);
-
+            logger.LogDebug("Skipping telemetry for monitoring connection from {Remote}.", remote);
+            _ = await ProcessAsync(context.Stream, remote, options.Value, logger, cancellationToken);
             return;
         }
 
         string remoteString = remote?.ToString() ?? "unknown";
         string correlationId = Guid.NewGuid().ToString("N");
 
-        Task startedTelemetryTask =
-            PublishDiscardStartedAsync(
-                remoteString,
-                DateTimeOffset.UtcNow,
-                correlationId,
-                cancellationToken);
+        Task startedTelemetryTask = PublishDiscardStartedAsync(
+            remoteString,
+            DateTimeOffset.UtcNow,
+            correlationId,
+            cancellationToken);
 
-        DiscardProtocolResult protocolResult =
-            await ProcessAsync(
-                context.Stream,
-                remote,
-                options.Value,
-                logger,
-                cancellationToken);
+        DiscardProtocolResult protocolResult = await ProcessAsync(
+            context.Stream,
+            remote,
+            options.Value,
+            logger,
+            cancellationToken);
 
-        var telemetryResult =
-            new DiscardSessionTelemetryResult(
-                Remote:
-                    remoteString,
-                BytesDiscarded:
-                    protocolResult.BytesDiscarded,
-                DurationMilliseconds:
-                    protocolResult.DurationMilliseconds,
-                Outcome:
-                    protocolResult.Outcome,
-                Succeeded:
-                    protocolResult.Succeeded,
-                OccurredAt:
-                    DateTimeOffset.UtcNow,
-                CorrelationId:
-                    correlationId);
+        var telemetryResult = new DiscardSessionTelemetryResult(
+            Remote: remoteString,
+            BytesDiscarded: protocolResult.BytesDiscarded,
+            DurationMilliseconds: protocolResult.DurationMilliseconds,
+            Outcome: protocolResult.Outcome,
+            Succeeded: protocolResult.Succeeded,
+            OccurredAt: DateTimeOffset.UtcNow,
+            CorrelationId: correlationId);
 
-        long connectionId =
-            context.ConnectionId;
+        long connectionId = context.ConnectionId;
 
-        context.RegisterAfterClose(
-            afterCloseToken =>
-                CompleteTelemetryAsync(
-                    connectionId,
-                    startedTelemetryTask,
-                    telemetryResult,
-                    afterCloseToken));
+        context.RegisterAfterClose(afterCloseToken => CompleteTelemetryAsync(
+            connectionId,
+            startedTelemetryTask,
+            telemetryResult,
+            afterCloseToken));
     }
 
     private async ValueTask CompleteTelemetryAsync(
@@ -107,8 +81,7 @@ public sealed class DiscardConnectionHandler(
         {
             await startedTelemetryTask;
         }
-        catch (OperationCanceledException)
-            when (cancellationToken.IsCancellationRequested)
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
             logger.LogDebug(
                 "Discard-started telemetry for connection {ConnectionId} was cancelled during shutdown.",
@@ -116,9 +89,7 @@ public sealed class DiscardConnectionHandler(
         }
         catch (OperationCanceledException)
         {
-            logger.LogWarning(
-                "Discard-started telemetry for connection {ConnectionId} timed out.",
-                connectionId);
+            logger.LogWarning("Discard-started telemetry for connection {ConnectionId} timed out.", connectionId);
         }
         catch (Exception exception)
         {
@@ -128,10 +99,7 @@ public sealed class DiscardConnectionHandler(
                 connectionId);
         }
 
-        await PublishDiscardStoppedAsync(
-            connectionId,
-            result,
-            cancellationToken);
+        await PublishDiscardStoppedAsync(connectionId, result, cancellationToken);
     }
 
     private async Task PublishDiscardStartedAsync(
@@ -140,43 +108,23 @@ public sealed class DiscardConnectionHandler(
         string correlationId,
         CancellationToken cancellationToken)
     {
-        using var timeout =
-            CancellationTokenSource.CreateLinkedTokenSource(
-                cancellationToken);
+        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        timeout.CancelAfter(TelemetryPublishTimeout);
 
-        timeout.CancelAfter(
-            TelemetryPublishTimeout);
-
-        bool published =
-            await missionControlClient.TryPublishAsync(
-                eventType:
-                    HappyDiscardEventTypes.DiscardStarted,
-                payload:
-                    new DiscardStartedEvent(
-                        Remote:
-                            remote,
-                        RequestTimeoutSeconds:
-                            options.Value
-                                .RequestTimeoutSeconds,
-                        MaxBytesPerConnection:
-                            options.Value
-                                .MaxBytesPerConnection),
-                payloadTypeInfo:
-                    HappyDiscardJsonContext
-                        .Default
-                        .DiscardStartedEvent,
-                occurredAt:
-                    occurredAt,
-                correlationId:
-                    correlationId,
-                cancellationToken:
-                    timeout.Token);
+        bool published = await missionControlClient.TryPublishAsync(
+            eventType: HappyDiscardEventTypes.DiscardStarted,
+            payload: new DiscardStartedEvent(
+                Remote: remote,
+                RequestTimeoutSeconds: options.Value.RequestTimeoutSeconds,
+                MaxBytesPerConnection: options.Value.MaxBytesPerConnection),
+            payloadTypeInfo: HappyDiscardJsonContext.Default.DiscardStartedEvent,
+            occurredAt: occurredAt,
+            correlationId: correlationId,
+            cancellationToken: timeout.Token);
 
         if (!published)
         {
-            logger.LogWarning(
-                "Mission Control did not accept {EventType}.",
-                HappyDiscardEventTypes.DiscardStarted);
+            logger.LogWarning("Mission Control did not accept {EventType}.", HappyDiscardEventTypes.DiscardStarted);
         }
     }
 
@@ -185,54 +133,33 @@ public sealed class DiscardConnectionHandler(
         DiscardSessionTelemetryResult result,
         CancellationToken cancellationToken)
     {
-        using var timeout =
-            CancellationTokenSource.CreateLinkedTokenSource(
-                cancellationToken);
-
-        timeout.CancelAfter(
-            TelemetryPublishTimeout);
+        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        timeout.CancelAfter(TelemetryPublishTimeout);
 
         try
         {
-            bool published =
-                await missionControlClient.TryPublishAsync(
-                    eventType:
-                        HappyDiscardEventTypes
-                            .DiscardStopped,
-                    payload:
-                        new DiscardStoppedEvent(
-                            Remote:
-                                result.Remote,
-                            BytesDiscarded:
-                                result.BytesDiscarded,
-                            DurationMilliseconds:
-                                result.DurationMilliseconds,
-                            Outcome:
-                                result.Outcome,
-                            Succeeded:
-                                result.Succeeded),
-                    payloadTypeInfo:
-                        HappyDiscardJsonContext
-                            .Default
-                            .DiscardStoppedEvent,
-                    occurredAt:
-                        result.OccurredAt,
-                    correlationId:
-                        result.CorrelationId,
-                    cancellationToken:
-                        timeout.Token);
+            bool published = await missionControlClient.TryPublishAsync(
+                eventType: HappyDiscardEventTypes.DiscardStopped,
+                payload: new DiscardStoppedEvent(
+                    Remote: result.Remote,
+                    BytesDiscarded: result.BytesDiscarded,
+                    DurationMilliseconds: result.DurationMilliseconds,
+                    Outcome: result.Outcome,
+                    Succeeded: result.Succeeded),
+                payloadTypeInfo: HappyDiscardJsonContext.Default.DiscardStoppedEvent,
+                occurredAt: result.OccurredAt,
+                correlationId: result.CorrelationId,
+                cancellationToken: timeout.Token);
 
             if (!published)
             {
                 logger.LogWarning(
                     "Mission Control did not accept {EventType} for connection {ConnectionId}.",
-                    HappyDiscardEventTypes
-                        .DiscardStopped,
+                    HappyDiscardEventTypes.DiscardStopped,
                     connectionId);
             }
         }
-        catch (OperationCanceledException)
-            when (cancellationToken.IsCancellationRequested)
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
             logger.LogDebug(
                 "Mission Control event publication for connection {ConnectionId} was cancelled during shutdown.",
@@ -253,45 +180,28 @@ public sealed class DiscardConnectionHandler(
         }
     }
 
-    private bool IsIgnoredTelemetrySource(
-        EndPoint? remote)
+    private bool IsIgnoredTelemetrySource(EndPoint? remote)
     {
-        string? remoteAddress =
-            (remote as IPEndPoint)?
-                .Address
-                .MapToIPv4()
-                .ToString();
+        string? remoteAddress = (remote as IPEndPoint)?.Address.MapToIPv4().ToString();
 
-        return
-            !string.IsNullOrWhiteSpace(
-                options.Value
-                    .TelemetryIgnoredRemoteAddress) &&
+        return !string.IsNullOrWhiteSpace(options.Value.TelemetryIgnoredRemoteAddress) &&
             string.Equals(
                 remoteAddress,
-                options.Value
-                    .TelemetryIgnoredRemoteAddress,
+                options.Value.TelemetryIgnoredRemoteAddress,
                 StringComparison.OrdinalIgnoreCase);
     }
 
-    internal static async ValueTask<DiscardProtocolResult>
-        ProcessAsync(
-            Stream stream,
-            EndPoint? remote,
-            HappyDiscardOptions options,
-            ILogger logger,
-            CancellationToken cancellationToken)
+    internal static async ValueTask<DiscardProtocolResult> ProcessAsync(
+        Stream stream,
+        EndPoint? remote,
+        HappyDiscardOptions options,
+        ILogger logger,
+        CancellationToken cancellationToken)
     {
-        Stopwatch stopwatch =
-            Stopwatch.StartNew();
-
-        var state =
-            new DiscardSessionState();
-
-        string outcome =
-            "failed";
-
-        bool succeeded =
-            false;
+        Stopwatch stopwatch = Stopwatch.StartNew();
+        var state = new DiscardSessionState();
+        string outcome = "failed";
+        bool succeeded = false;
 
         try
         {
@@ -302,63 +212,35 @@ public sealed class DiscardConnectionHandler(
                 state,
                 cancellationToken);
 
-            outcome =
-                state.ByteLimitReached
-                    ? "byte-limit-reached"
-                    : "client-disconnected";
-
-            succeeded =
-                true;
+            outcome = state.ByteLimitReached
+                ? "byte-limit-reached"
+                : "client-disconnected";
+            succeeded = true;
         }
-        catch (OperationCanceledException)
-            when (cancellationToken
-                .IsCancellationRequested)
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
-            outcome =
-                "server-shutdown";
-
-            logger.LogDebug(
-                "Discard session from {Remote} was cancelled during shutdown.",
-                remote);
+            outcome = "server-shutdown";
+            logger.LogDebug("Discard session from {Remote} was cancelled during shutdown.", remote);
         }
         catch (OperationCanceledException)
         {
-            outcome =
-                "timeout";
-
-            logger.LogDebug(
-                "Discard session from {Remote} timed out.",
-                remote);
+            outcome = "timeout";
+            logger.LogDebug("Discard session from {Remote} timed out.", remote);
         }
         catch (IOException exception)
         {
-            outcome =
-                "io-error";
-
-            logger.LogDebug(
-                exception,
-                "Discard session from {Remote} ended early.",
-                remote);
+            outcome = "io-error";
+            logger.LogDebug(exception, "Discard session from {Remote} ended early.", remote);
         }
         catch (SocketException exception)
         {
-            outcome =
-                "socket-error";
-
-            logger.LogDebug(
-                exception,
-                "Socket error during Discard session from {Remote}.",
-                remote);
+            outcome = "socket-error";
+            logger.LogDebug(exception, "Socket error during Discard session from {Remote}.", remote);
         }
         catch (Exception exception)
         {
-            outcome =
-                "failed";
-
-            logger.LogError(
-                exception,
-                "Unhandled error during Discard session from {Remote}.",
-                remote);
+            outcome = "failed";
+            logger.LogError(exception, "Unhandled error during Discard session from {Remote}.", remote);
         }
         finally
         {
@@ -366,14 +248,10 @@ public sealed class DiscardConnectionHandler(
         }
 
         return new DiscardProtocolResult(
-            BytesDiscarded:
-                state.BytesDiscarded,
-            DurationMilliseconds:
-                stopwatch.ElapsedMilliseconds,
-            Outcome:
-                outcome,
-            Succeeded:
-                succeeded);
+            BytesDiscarded: state.BytesDiscarded,
+            DurationMilliseconds: stopwatch.ElapsedMilliseconds,
+            Outcome: outcome,
+            Succeeded: succeeded);
     }
 
     private static async ValueTask DiscardAsync(
@@ -383,66 +261,38 @@ public sealed class DiscardConnectionHandler(
         DiscardSessionState state,
         CancellationToken cancellationToken)
     {
-        const int BufferSize =
-            4096;
+        const int BufferSize = 4096;
+        byte[] buffer = ArrayPool<byte>.Shared.Rent(BufferSize);
 
-        byte[] buffer =
-            ArrayPool<byte>.Shared.Rent(
-                BufferSize);
-
-        using var timeout =
-            CancellationTokenSource
-                .CreateLinkedTokenSource(
-                    cancellationToken);
-
-        timeout.CancelAfter(
-            requestTimeout);
+        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        timeout.CancelAfter(requestTimeout);
 
         try
         {
-            while (state.BytesDiscarded <
-                   maxBytesPerConnection)
+            while (state.BytesDiscarded < maxBytesPerConnection)
             {
-                long remaining =
-                    maxBytesPerConnection -
-                    state.BytesDiscarded;
-
-                int readSize =
-                    (int)Math.Min(
-                        BufferSize,
-                        remaining);
-
-                int bytesRead =
-                    await stream.ReadAsync(
-                        buffer.AsMemory(
-                            0,
-                            readSize),
-                        timeout.Token);
+                long remaining = maxBytesPerConnection - state.BytesDiscarded;
+                int readSize = (int)Math.Min(BufferSize, remaining);
+                int bytesRead = await stream.ReadAsync(buffer.AsMemory(0, readSize), timeout.Token);
 
                 if (bytesRead == 0)
                 {
                     break;
                 }
 
-                state.BytesDiscarded +=
-                    bytesRead;
+                state.BytesDiscarded += bytesRead;
             }
 
-            state.ByteLimitReached =
-                state.BytesDiscarded >=
-                maxBytesPerConnection;
+            state.ByteLimitReached = state.BytesDiscarded >= maxBytesPerConnection;
         }
         finally
         {
-            ArrayPool<byte>.Shared.Return(
-                buffer);
+            ArrayPool<byte>.Shared.Return(buffer);
         }
     }
 
-    internal static TimeSpan GetRequestTimeout(
-        HappyDiscardOptions options) =>
-        TimeSpan.FromSeconds(
-            options.RequestTimeoutSeconds);
+    internal static TimeSpan GetRequestTimeout(HappyDiscardOptions options) =>
+        TimeSpan.FromSeconds(options.RequestTimeoutSeconds);
 }
 
 internal sealed record DiscardProtocolResult(
