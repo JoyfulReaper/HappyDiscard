@@ -8,9 +8,7 @@ using HappyDiscard.Events;
 using JoyfulReaperLib.JRNet;
 using JoyfulReaperLib.MissionControl;
 using Microsoft.Extensions.Options;
-using System.Buffers;
 using System.Collections.Concurrent;
-using System.Diagnostics;
 using System.Net;
 using System.Net.Sockets;
 
@@ -179,12 +177,27 @@ public class DiscardWorker(
                 {
                     logger.LogDebug("Received request: request from {Remote}.", client.Client.RemoteEndPoint);
                     await using NetworkStream stream = client.GetStream();
-                    telemetry = await ProcessDiscardProtocolAsync(
-                        stream,
-                        remote,
-                        isIgnoredTelemetrySource,
-                        correlationId,
-                        stoppingToken);
+                    DiscardProtocolResult result =
+                        await DiscardConnectionHandler.ProcessAsync(
+                            stream,
+                            remote,
+                            options.Value,
+                            logger,
+                            stoppingToken);
+
+                    if (!isIgnoredTelemetrySource)
+                    {
+                        telemetry =
+                            new DiscardSessionTelemetryResult(
+                                Remote: remote?.ToString() ?? "unknown",
+                                BytesDiscarded: result.BytesDiscarded,
+                                DurationMilliseconds:
+                                result.DurationMilliseconds,
+                                Outcome: result.Outcome,
+                                Succeeded: result.Succeeded,
+                                OccurredAt: DateTimeOffset.UtcNow,
+                                CorrelationId: correlationId);
+                    }
 
                 }
                 catch (OperationCanceledException)
@@ -315,134 +328,6 @@ public class DiscardWorker(
         }
     }
 
-
-    private async Task<DiscardSessionTelemetryResult?> ProcessDiscardProtocolAsync(
-        Stream stream,
-        EndPoint? remote,
-        bool isIgnoredTelemetrySource,
-        string correlationId,
-        CancellationToken stoppingToken)
-    {
-        string remoteString = remote?.ToString() ?? "unknown";
-        Stopwatch stopwatch = Stopwatch.StartNew();
-        var state = new DiscardSessionState();
-
-        if (isIgnoredTelemetrySource)
-        {
-            logger.LogDebug(
-                "Skipping telemetry for monitoring connection from {Remote}.",
-                remote);
-        }
-
-        string outcome = "failed";
-        bool succeeded = false;
-
-        try
-        {
-            await DiscardAsync(stream,
-                options.Value.RequestTimeoutSeconds,
-                options.Value.MaxBytesPerConnection,
-                state,
-                stoppingToken);
-
-            outcome = state.ByteLimitReached ? "byte-limit-reached" : "client-disconnected";
-            succeeded = true;
-        }
-        catch (OperationCanceledException)
-            when (stoppingToken.IsCancellationRequested)
-        {
-            outcome = "server-shutdown";
-            logger.LogDebug(
-                "Discard session from {Remote} was cancelled during shutdown.",
-                remote);
-        }
-        catch (OperationCanceledException)
-        {
-            outcome = "timeout";
-            logger.LogDebug(
-                "Discard session from {Remote} timed out.",
-                remote);
-        }
-        catch (IOException exception)
-        {
-            outcome = "io-error";
-            logger.LogDebug(
-                exception,
-                "Discard session from {Remote} ended early.",
-                remote);
-        }
-        catch (SocketException exception)
-        {
-            outcome = "socket-error";
-            logger.LogDebug(
-                exception,
-                "Socket error during Discard session from {Remote}.",
-                remote);
-        }
-        catch (Exception exception)
-        {
-            outcome = "failed";
-            logger.LogError(
-                exception,
-                "Unhandled error during Discard session from {Remote}.",
-                remote);
-        }
-        finally
-        {
-            stopwatch.Stop();
-        }
-
-        if (isIgnoredTelemetrySource)
-            return null;
-
-        return new DiscardSessionTelemetryResult(
-            remoteString,
-            state.BytesDiscarded,
-            stopwatch.ElapsedMilliseconds,
-            outcome,
-            succeeded,
-            OccurredAt: DateTimeOffset.UtcNow,
-            correlationId);
-    }
-
-    private static async Task DiscardAsync(
-        Stream stream,
-        int RequestTimeoutSeconds,
-        long maxBytesPerConnection,
-        DiscardSessionState state,
-        CancellationToken stoppingToken)
-    {
-        const int BUFFER_SIZE = 4096;
-        byte[] buffer = ArrayPool<byte>.Shared.Rent(BUFFER_SIZE);
-
-        // We dont want to keep discarding data forever so we set a timeout
-        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(stoppingToken);
-        timeout.CancelAfter(TimeSpan.FromSeconds(RequestTimeoutSeconds));
-
-        try
-        {
-            while (state.BytesDiscarded < maxBytesPerConnection)
-            {
-                long remaining = maxBytesPerConnection - state.BytesDiscarded;
-                int readSize = (int)Math.Min(BUFFER_SIZE, remaining);
-
-                int bytesRead = await stream.ReadAsync(buffer.AsMemory(0, readSize), timeout.Token);
-                if (bytesRead == 0)
-                {
-                    break;
-                }
-
-                state.BytesDiscarded += bytesRead;
-            }
-
-            state.ByteLimitReached = state.BytesDiscarded >= maxBytesPerConnection;
-        }
-        finally
-        {
-            ArrayPool<byte>.Shared.Return(buffer);
-        }
-    }
-
     private async Task PublishDiscardStartedAsync(
         string remote,
         DateTimeOffset occurredAt,
@@ -481,9 +366,8 @@ public class DiscardWorker(
         return base.StopAsync(cancellationToken);
     }
 
-    internal static TimeSpan GetRequestTimeout(
-        HappyDiscardOptions options) =>
-            TimeSpan.FromSeconds(options.RequestTimeoutSeconds);
+    internal static TimeSpan GetRequestTimeout(HappyDiscardOptions options) =>
+        DiscardConnectionHandler.GetRequestTimeout(options);
 
 
     private bool IsIgnoredTelemetrySource(
