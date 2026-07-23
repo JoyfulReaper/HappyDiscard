@@ -1,11 +1,12 @@
 /*
- * Happy Discard Server
+ * Happy Discard Service
  * Copyright (c) 2026 Kyle Givler
  * Licensed under the MIT License.
  */
 
 using HappyDiscard;
 using JoyfulReaperLib.MissionControl;
+using JoyfulReaperLib.TcpServer;
 
 var builder = Host.CreateApplicationBuilder(args);
 
@@ -25,10 +26,13 @@ builder.Services
     .ValidateOnStart();
 
 builder.Services.AddMissionControlClient(
-    builder.Configuration.GetSection(
-        MissionControlClientOptions.SectionName));
+    builder.Configuration.GetSection(MissionControlClientOptions.SectionName));
 
-builder.Services.AddHostedService<DiscardWorker>();
+builder.Services
+    .AddTcpServer<DiscardConnectionHandler, HappyDiscardOptions>();
+
+builder.Services
+    .AddHostedService<DiscardLifecycleService>();
 
 var host = builder.Build();
 host.Run();

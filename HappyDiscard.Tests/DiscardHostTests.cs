@@ -1,8 +1,9 @@
 using HappyDiscard.Events;
 using JoyfulReaperLib.MissionControl;
-using Microsoft.Extensions.Logging.Abstractions;
-using Microsoft.Extensions.Options;
-using System.Diagnostics;
+using JoyfulReaperLib.TcpServer;
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Hosting;
+using Microsoft.Extensions.Logging;
 using System.Net;
 using System.Net.Sockets;
 using System.Text.Json.Serialization.Metadata;
@@ -10,7 +11,7 @@ using Xunit;
 
 namespace HappyDiscard.Tests;
 
-public sealed class DiscardWorkerTests
+public sealed class DiscardHostTests
 {
     private static readonly TimeSpan WaitTimeout = TimeSpan.FromSeconds(5);
 
@@ -58,7 +59,12 @@ public sealed class DiscardWorkerTests
     public async Task ClientDisconnect_PublishesStartedAndStoppedSessionTelemetry()
     {
         var missionControl = new FakeMissionControlClient();
-        await using var server = await DiscardServer.StartAsync(missionControl);
+        var options = new HappyDiscardOptions
+        {
+            RequestTimeoutSeconds = 3,
+            MaxBytesPerConnection = 128
+        };
+        await using var server = await DiscardServer.StartAsync(missionControl, options);
         byte[] bytes = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9];
 
         await SendAndWaitForCloseAsync(server.Port, bytes);
@@ -69,6 +75,13 @@ public sealed class DiscardWorkerTests
         Publication stopped = await missionControl.WaitForSuccessfulAsync(
             HappyDiscardEventTypes.DiscardStopped,
             WaitTimeout);
+
+        DiscardStartedEvent startedPayload =
+            Assert.IsType<DiscardStartedEvent>(started.Payload);
+        Assert.StartsWith($"{IPAddress.Loopback}:", startedPayload.Remote);
+        Assert.Equal(options.RequestTimeoutSeconds, startedPayload.RequestTimeoutSeconds);
+        Assert.Equal(options.MaxBytesPerConnection, startedPayload.MaxBytesPerConnection);
+        Assert.Equal(typeof(DiscardStartedEvent), started.DeclaredPayloadType);
 
         DiscardStoppedEvent payload = Assert.IsType<DiscardStoppedEvent>(stopped.Payload);
         Assert.Equal(bytes.Length, payload.BytesDiscarded);
@@ -121,7 +134,9 @@ public sealed class DiscardWorkerTests
         DiscardStoppedEvent payload = Assert.IsType<DiscardStoppedEvent>(stopped.Payload);
         Assert.Equal("timeout", payload.Outcome);
         Assert.False(payload.Succeeded);
-        Assert.True(client.Connected);
+        Assert.True(
+            await ReadShowsConnectionClosedAsync(
+                client.GetStream()));
     }
 
     [Fact]
@@ -271,7 +286,7 @@ public sealed class DiscardWorkerTests
             RequestTimeoutSeconds = 17
         };
 
-        Assert.Equal(TimeSpan.FromSeconds(17), DiscardWorker.GetRequestTimeout(options));
+        Assert.Equal(TimeSpan.FromSeconds(17), DiscardConnectionHandler.GetRequestTimeout(options));
     }
 
     private static async Task<TcpClient> ConnectAsync(int port)
@@ -325,12 +340,13 @@ public sealed class DiscardWorkerTests
 
     private sealed class DiscardServer : IAsyncDisposable
     {
-        private readonly DiscardWorker _worker;
-        private bool _stopped;
+        private readonly IHost _host;
+        private readonly object _stopGate = new();
+        private Task? _stopTask;
 
-        private DiscardServer(DiscardWorker worker, int port)
+        private DiscardServer(IHost host, int port)
         {
-            _worker = worker;
+            _host = host;
             Port = port;
         }
 
@@ -348,29 +364,66 @@ public sealed class DiscardWorkerTests
 
             options.ListenAddress = IPAddress.Loopback.ToString();
 
-            var worker = new DiscardWorker(
-                NullLogger<DiscardWorker>.Instance,
-                missionControl,
-                Options.Create(options));
+            HostApplicationBuilder builder = Host.CreateApplicationBuilder();
+            builder.Logging.ClearProviders();
+            builder.Services.AddSingleton<IMissionControlClient>(missionControl);
 
-            await worker.StartAsync(CancellationToken.None).WaitAsync(WaitTimeout);
+            builder.Services.Configure<HappyDiscardOptions>(configured =>
+            {
+                configured.ListenAddress = options.ListenAddress;
+                configured.Port = options.Port;
+                configured.MaxConcurrentConnections = options.MaxConcurrentConnections;
+                configured.RequestTimeoutSeconds = options.RequestTimeoutSeconds;
+                configured.TelemetryIgnoredRemoteAddress = options.TelemetryIgnoredRemoteAddress;
+                configured.MaxBytesPerConnection = options.MaxBytesPerConnection;
+            });
+
+            builder.Services
+                .AddTcpServer<DiscardConnectionHandler, HappyDiscardOptions>();
+
+            builder.Services
+                .AddHostedService<DiscardLifecycleService>();
+
+            IHost host = builder.Build();
+
+            try
+            {
+                using var timeoutSource = new CancellationTokenSource(WaitTimeout);
+                await host.StartAsync(timeoutSource.Token);
+            }
+            catch
+            {
+                host.Dispose();
+                throw;
+            }
+
             await missionControl.WaitForAttemptAsync(
                 HappyDiscardEventTypes.ServiceStarted,
                 WaitTimeout);
 
-            return new DiscardServer(worker, options.Port);
+            return new DiscardServer(host, options.Port);
         }
 
-        public async Task StopAsync()
+        public Task StopAsync()
         {
-            if (_stopped)
+            lock (_stopGate)
             {
-                return;
+                return _stopTask ??= StopCoreAsync();
             }
+        }
 
-            _stopped = true;
-            await _worker.StopAsync(CancellationToken.None).WaitAsync(WaitTimeout);
-            _worker.Dispose();
+        private async Task StopCoreAsync()
+        {
+            using var timeoutSource = new CancellationTokenSource(WaitTimeout);
+
+            try
+            {
+                await _host.StopAsync(timeoutSource.Token);
+            }
+            finally
+            {
+                _host.Dispose();
+            }
         }
 
         public async ValueTask DisposeAsync()
@@ -386,8 +439,6 @@ public sealed class DiscardWorkerTests
         private readonly List<Publication> _successful = [];
         private readonly Dictionary<string, int> _throwsRemainingByEventType = [];
         private readonly HashSet<string> _blockedEventTypes = [];
-        private readonly TaskCompletionSource _publicationChanged =
-            new(TaskCreationOptions.RunContinuationsAsynchronously);
         private TaskCompletionSource _nextPublicationChanged =
             new(TaskCreationOptions.RunContinuationsAsynchronously);
         private TaskCompletionSource _releaseBlockedTelemetry =
@@ -559,25 +610,28 @@ public sealed class DiscardWorkerTests
             _nextPublicationChanged.TrySetResult();
             _nextPublicationChanged =
                 new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-            _publicationChanged.TrySetResult();
         }
 
-        private async Task<T> WaitForAsync<T>(Func<T?> getResult, TimeSpan timeout)
+        private async Task<T> WaitForAsync<T>(
+            Func<T?> getResult,
+            TimeSpan timeout)
             where T : class
         {
             using var timeoutSource = new CancellationTokenSource(timeout);
 
             while (true)
             {
-                T? result = getResult();
-                if (result is not null)
-                {
-                    return result;
-                }
-
                 Task nextChange;
+
                 lock (_gate)
                 {
+                    T? result = getResult();
+
+                    if (result is not null)
+                    {
+                        return result;
+                    }
+
                     nextChange = _nextPublicationChanged.Task;
                 }
 
@@ -589,11 +643,17 @@ public sealed class DiscardWorkerTests
         {
             using var timeoutSource = new CancellationTokenSource(timeout);
 
-            while (!condition())
+            while (true)
             {
                 Task nextChange;
+
                 lock (_gate)
                 {
+                    if (condition())
+                    {
+                        return;
+                    }
+
                     nextChange = _nextPublicationChanged.Task;
                 }
 
