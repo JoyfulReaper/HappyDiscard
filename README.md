@@ -35,13 +35,23 @@ For the recommended Linux VPS deployment:
 
 The repository includes a `NuGet.config` and `local-nuget` package feed for the JoyfulReaperLib packages used by Docker builds. Keep those package files in sync with the versions referenced by `HappyDiscard/HappyDiscard.csproj`.
 
+Current local package dependencies:
+
+| Package | Version |
+| --- | ---: |
+| `JoyfulReaperLib` | `0.0.11` |
+| `JoyfulReaperLib.MissionControl` | `0.0.3` |
+| `JoyfulReaperLib.TcpServer` | `0.0.4` |
+
+`JoyfulReaperLib.TcpServer` 0.0.4 or later is required for warning-free Native AOT publishing with .NET 10.
+
 ## Build And Test
 
 ```bash
 git clone https://github.com/JoyfulReaper/HappyDiscard.git
 cd HappyDiscard
 
-dotnet restore HappyDiscard.slnx
+dotnet restore HappyDiscard.slnx --configfile NuGet.config
 dotnet build HappyDiscard.slnx --configuration Release --no-restore
 dotnet test HappyDiscard.slnx --configuration Release --no-build
 ```
@@ -180,10 +190,12 @@ Build the image:
 docker build --no-cache -t happy-discard .
 ```
 
+The build should complete without `IL2xxx` Native AOT or trimming warnings from HappyDiscard or its dependencies.
+
 The Dockerfile:
 
 * Restores, tests, and publishes in a .NET SDK build stage.
-* Publishes a Native AOT executable.
+* Publishes a Native AOT executable and serves as the release trim-analysis check.
 * Uses the small .NET `runtime-deps` image for the final stage.
 * Does not contain the full managed .NET runtime.
 * Runs as `${APP_UID}`, not root.
