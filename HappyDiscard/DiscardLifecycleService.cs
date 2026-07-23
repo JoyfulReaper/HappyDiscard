@@ -32,8 +32,7 @@ public sealed class DiscardLifecycleService(
     /// <inheritdoc />
     public async Task StartedAsync(CancellationToken cancellationToken)
     {
-        var listenAddress =
-            IPAddressUtils.ParseListenAddress(options.Value.ListenAddress);
+        var listenAddress = IPAddressUtils.ParseListenAddress(options.Value.ListenAddress);
 
         logger.LogInformation(
             "HappyDiscard service listening on {IPAddress}:{Port}.",
