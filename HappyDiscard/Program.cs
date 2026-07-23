@@ -6,6 +6,7 @@
 
 using HappyDiscard;
 using JoyfulReaperLib.MissionControl;
+using JoyfulReaperLib.TcpServer;
 
 var builder = Host.CreateApplicationBuilder(args);
 
@@ -28,7 +29,14 @@ builder.Services.AddMissionControlClient(
     builder.Configuration.GetSection(
         MissionControlClientOptions.SectionName));
 
-builder.Services.AddHostedService<DiscardWorker>();
+builder.Services
+    .AddTcpServer<
+        DiscardConnectionHandler,
+        HappyDiscardOptions>();
+
+builder.Services
+    .AddHostedService<
+        DiscardLifecycleService>();
 
 var host = builder.Build();
 host.Run();
