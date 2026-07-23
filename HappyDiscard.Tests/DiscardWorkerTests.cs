@@ -58,7 +58,12 @@ public sealed class DiscardWorkerTests
     public async Task ClientDisconnect_PublishesStartedAndStoppedSessionTelemetry()
     {
         var missionControl = new FakeMissionControlClient();
-        await using var server = await DiscardServer.StartAsync(missionControl);
+        var options = new HappyDiscardOptions
+        {
+            RequestTimeoutSeconds = 3,
+            MaxBytesPerConnection = 128
+        };
+        await using var server = await DiscardServer.StartAsync(missionControl, options);
         byte[] bytes = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9];
 
         await SendAndWaitForCloseAsync(server.Port, bytes);
@@ -69,6 +74,13 @@ public sealed class DiscardWorkerTests
         Publication stopped = await missionControl.WaitForSuccessfulAsync(
             HappyDiscardEventTypes.DiscardStopped,
             WaitTimeout);
+
+        DiscardStartedEvent startedPayload =
+            Assert.IsType<DiscardStartedEvent>(started.Payload);
+        Assert.StartsWith($"{IPAddress.Loopback}:", startedPayload.Remote);
+        Assert.Equal(options.RequestTimeoutSeconds, startedPayload.RequestTimeoutSeconds);
+        Assert.Equal(options.MaxBytesPerConnection, startedPayload.MaxBytesPerConnection);
+        Assert.Equal(typeof(DiscardStartedEvent), started.DeclaredPayloadType);
 
         DiscardStoppedEvent payload = Assert.IsType<DiscardStoppedEvent>(stopped.Payload);
         Assert.Equal(bytes.Length, payload.BytesDiscarded);
@@ -121,7 +133,9 @@ public sealed class DiscardWorkerTests
         DiscardStoppedEvent payload = Assert.IsType<DiscardStoppedEvent>(stopped.Payload);
         Assert.Equal("timeout", payload.Outcome);
         Assert.False(payload.Succeeded);
-        Assert.True(client.Connected);
+        Assert.True(
+            await ReadShowsConnectionClosedAsync(
+                client.GetStream()));
     }
 
     [Fact]
@@ -386,8 +400,6 @@ public sealed class DiscardWorkerTests
         private readonly List<Publication> _successful = [];
         private readonly Dictionary<string, int> _throwsRemainingByEventType = [];
         private readonly HashSet<string> _blockedEventTypes = [];
-        private readonly TaskCompletionSource _publicationChanged =
-            new(TaskCreationOptions.RunContinuationsAsynchronously);
         private TaskCompletionSource _nextPublicationChanged =
             new(TaskCreationOptions.RunContinuationsAsynchronously);
         private TaskCompletionSource _releaseBlockedTelemetry =
@@ -559,25 +571,28 @@ public sealed class DiscardWorkerTests
             _nextPublicationChanged.TrySetResult();
             _nextPublicationChanged =
                 new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-            _publicationChanged.TrySetResult();
         }
 
-        private async Task<T> WaitForAsync<T>(Func<T?> getResult, TimeSpan timeout)
+        private async Task<T> WaitForAsync<T>(
+            Func<T?> getResult,
+            TimeSpan timeout)
             where T : class
         {
             using var timeoutSource = new CancellationTokenSource(timeout);
 
             while (true)
             {
-                T? result = getResult();
-                if (result is not null)
-                {
-                    return result;
-                }
-
                 Task nextChange;
+
                 lock (_gate)
                 {
+                    T? result = getResult();
+
+                    if (result is not null)
+                    {
+                        return result;
+                    }
+
                     nextChange = _nextPublicationChanged.Task;
                 }
 
@@ -589,11 +604,17 @@ public sealed class DiscardWorkerTests
         {
             using var timeoutSource = new CancellationTokenSource(timeout);
 
-            while (!condition())
+            while (true)
             {
                 Task nextChange;
+
                 lock (_gate)
                 {
+                    if (condition())
+                    {
+                        return;
+                    }
+
                     nextChange = _nextPublicationChanged.Task;
                 }
 
