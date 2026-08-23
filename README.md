@@ -1,12 +1,14 @@
 # HappyDiscard
 
-HappyDiscard is a lightweight asynchronous TCP discard server written in C# and .NET 10.
+HappyDiscard is a lightweight asynchronous TCP and optional UDP discard server written in C# and .NET 10.
 
 It implements the classic Discard Protocol: every byte received from a client is accepted and thrown away. Discarded content is never decoded, stored, logged, echoed, or published to telemetry.
 
 ## Features
 
 * Asynchronous TCP connections
+* IPv6 and dual-stack TCP listening
+* Optional UDP discard service
 * Configurable address and port
 * Concurrent connection limit
 * Connection timeout
@@ -69,12 +71,17 @@ HappyDiscard reads settings from the `Discard` configuration section.
 ```json
 {
   "Discard": {
-    "ListenAddress": "0.0.0.0",
+    "ListenAddress": "::",
+    "DualMode": true,
     "Port": 9,
     "MaxConcurrentConnections": 64,
     "RequestTimeoutSeconds": 15,
     "MaxBytesPerConnection": 1048576,
-    "TelemetryIgnoredRemoteAddress": null
+    "TelemetryIgnoredRemoteAddress": null,
+    "UdpEnabled": false,
+    "UdpListenAddress": null,
+    "UdpPort": null,
+    "MaxUdpDatagramBytes": 65507
   },
   "MissionControl": {
     "Enabled": false,
@@ -87,12 +94,17 @@ HappyDiscard reads settings from the `Discard` configuration section.
 
 | Setting                         |     Default | Description                                                                        |
 | ------------------------------- | ----------: | ---------------------------------------------------------------------------------- |
-| `ListenAddress`                 | `127.0.0.1` | Address used by the TCP listener. Use `0.0.0.0` to accept remote IPv4 connections. |
+| `ListenAddress`                 |        `::` | Address used by the TCP listener. Use `127.0.0.1` for IPv4 loopback or `::1` for IPv6 loopback. |
+| `DualMode`                      |      `true` | Enables IPv4 and IPv6 on a TCP IPv6-any (`::`) listener.                            |
 | `Port`                          |         `9` | TCP listening port. Port 9 is the traditional Discard Protocol port.               |
 | `MaxConcurrentConnections`      |        `64` | Maximum number of simultaneous client connections.                                 |
 | `RequestTimeoutSeconds`         |        `15` | Maximum lifetime of one connection.                                                |
 | `MaxBytesPerConnection`         |   `1048576` | Maximum bytes accepted during one connection. The default is 1 MiB.                |
 | `TelemetryIgnoredRemoteAddress` |     `null` | Optional monitor IP whose Discard sessions are processed normally but excluded from Mission Control lifecycle telemetry. |
+| `UdpEnabled`                    |     `false` | Enables the optional UDP Discard listener. Keep it disabled unless explicitly needed. |
+| `UdpListenAddress`              |     `null` | UDP listening address. When unset, `ListenAddress` is used.                         |
+| `UdpPort`                       |     `null` | UDP listening port. When unset, `Port` is used.                                     |
+| `MaxUdpDatagramBytes`           |     `65507` | Largest UDP datagram accepted; larger datagrams are dropped.                        |
 
 Settings can also be supplied through environment variables:
 
@@ -111,6 +123,142 @@ MissionControl__TimeoutMilliseconds=1000
 ```
 
 `TelemetryIgnoredRemoteAddress` suppresses Mission Control telemetry only. The TCP session is still accepted, discarded, timed out, byte-limited, and cleaned up normally. The comparison uses only the normalized remote IP address, not the source port, and IPv4-mapped IPv6 addresses are mapped to IPv4 before comparison. This is intended for Uptime Kuma or another trusted TCP monitor. Docker network gateway addresses vary by host and network, so verify the actual monitor source address before setting it.
+
+## Local protocol testing
+
+Port 9 is the conventional production Discard port. Use the unprivileged high port `7009` for these local tests. Run the server command in one PowerShell window and the matching client command in another. No `netcat` installation or administrator privileges are needed.
+
+The TCP client helper below connects, sends a small payload, and succeeds only when the server sends no bytes back during a short read window:
+
+```powershell
+function Test-TcpDiscard([string] $Address, [Net.Sockets.AddressFamily] $Family) {
+    $client = [Net.Sockets.TcpClient]::new($Family)
+    try {
+        $client.Connect($Address, 7009)
+        $stream = $client.GetStream()
+        $payload = [Text.Encoding]::UTF8.GetBytes('discard me')
+        $stream.Write($payload, 0, $payload.Length)
+        $stream.ReadTimeout = 500
+        try {
+            $value = $stream.ReadByte()
+            if ($value -ge 0) { throw "Unexpected response byte: $value" }
+        }
+        catch [IO.IOException] {
+            Write-Host 'Success: TCP connection accepted and no response received.'
+        }
+    }
+    finally {
+        $client.Dispose()
+    }
+}
+```
+
+TCP IPv4 loopback server and client:
+
+```powershell
+$env:Discard__ListenAddress = '127.0.0.1'
+$env:Discard__DualMode = 'false'
+$env:Discard__Port = '7009'
+$env:Discard__UdpEnabled = 'false'
+dotnet run --project .\HappyDiscard\HappyDiscard.csproj
+```
+
+```powershell
+Test-TcpDiscard '127.0.0.1' ([Net.Sockets.AddressFamily]::InterNetwork)
+```
+
+TCP IPv6 loopback server and client:
+
+```powershell
+$env:Discard__ListenAddress = '::1'
+$env:Discard__DualMode = 'false'
+$env:Discard__Port = '7009'
+$env:Discard__UdpEnabled = 'false'
+dotnet run --project .\HappyDiscard\HappyDiscard.csproj
+```
+
+```powershell
+Test-TcpDiscard '::1' ([Net.Sockets.AddressFamily]::InterNetworkV6)
+```
+
+For one dual-stack TCP listener, use the IPv6-any address with dual mode enabled, then run both client commands:
+
+```powershell
+$env:Discard__ListenAddress = '::'
+$env:Discard__DualMode = 'true'
+$env:Discard__Port = '7009'
+$env:Discard__UdpEnabled = 'false'
+dotnet run --project .\HappyDiscard\HappyDiscard.csproj
+```
+
+```powershell
+Test-TcpDiscard '127.0.0.1' ([Net.Sockets.AddressFamily]::InterNetwork)
+Test-TcpDiscard '::1' ([Net.Sockets.AddressFamily]::InterNetworkV6)
+```
+
+The UDP client helper sends one datagram and treats a receive timeout as the expected result:
+
+```powershell
+function Test-UdpDiscard([string] $Address, [Net.Sockets.AddressFamily] $Family) {
+    $client = [Net.Sockets.UdpClient]::new($Family)
+    try {
+        $client.Connect($Address, 7009)
+        $payload = [Text.Encoding]::UTF8.GetBytes('discard me')
+        [void] $client.Send($payload, $payload.Length)
+        $client.Client.ReceiveTimeout = 500
+        $remote = if ($Family -eq [Net.Sockets.AddressFamily]::InterNetworkV6) {
+            [Net.IPEndPoint]::new([Net.IPAddress]::IPv6Any, 0)
+        } else {
+            [Net.IPEndPoint]::new([Net.IPAddress]::Any, 0)
+        }
+        try {
+            [void] $client.Receive([ref] $remote)
+            throw 'Unexpected UDP response.'
+        }
+        catch [Net.Sockets.SocketException] {
+            if ($_.Exception.SocketErrorCode -ne [Net.Sockets.SocketError]::TimedOut) { throw }
+            Write-Host 'Success: UDP datagram sent and no response received.'
+        }
+    }
+    finally {
+        $client.Dispose()
+    }
+}
+```
+
+UDP IPv4 loopback server and client:
+
+```powershell
+$env:Discard__ListenAddress = '127.0.0.1'
+$env:Discard__DualMode = 'false'
+$env:Discard__Port = '7009'
+$env:Discard__UdpEnabled = 'true'
+$env:Discard__UdpListenAddress = '127.0.0.1'
+$env:Discard__UdpPort = '7009'
+dotnet run --project .\HappyDiscard\HappyDiscard.csproj
+```
+
+```powershell
+Test-UdpDiscard '127.0.0.1' ([Net.Sockets.AddressFamily]::InterNetwork)
+```
+
+UDP IPv6 loopback server and client:
+
+```powershell
+$env:Discard__ListenAddress = '::1'
+$env:Discard__DualMode = 'false'
+$env:Discard__Port = '7009'
+$env:Discard__UdpEnabled = 'true'
+$env:Discard__UdpListenAddress = '::1'
+$env:Discard__UdpPort = '7009'
+dotnet run --project .\HappyDiscard\HappyDiscard.csproj
+```
+
+```powershell
+Test-UdpDiscard '::1' ([Net.Sockets.AddressFamily]::InterNetworkV6)
+```
+
+TCP Discard reads stream bytes until the client disconnects, the request timeout or byte limit is reached, or the server shuts down. It never writes protocol data back. UDP Discard receives complete datagrams and never sends a response; UDP remains disabled by default and should remain disabled in production unless explicitly enabled. Payload content is discarded and must never be published to telemetry.
 
 ## Mission Control Events
 

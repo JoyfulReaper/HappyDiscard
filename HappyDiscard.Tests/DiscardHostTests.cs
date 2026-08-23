@@ -4,6 +4,7 @@ using JoyfulReaperLib.TcpServer;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
+using System.Collections.Concurrent;
 using System.Net;
 using System.Net.Sockets;
 using System.Text.Json.Serialization.Metadata;
@@ -289,6 +290,122 @@ public sealed class DiscardHostTests
         Assert.Equal(TimeSpan.FromSeconds(17), DiscardConnectionHandler.GetRequestTimeout(options));
     }
 
+    [Fact]
+    public async Task UdpIpv4_AcceptsDatagramWithoutSendingResponse()
+    {
+        int udpPort = GetFreeUdpPort(AddressFamily.InterNetwork);
+        await using var server = await DiscardServer.StartAsync(
+            new FakeMissionControlClient(),
+            new()
+            {
+                UdpEnabled = true,
+                UdpListenAddress = IPAddress.Loopback.ToString(),
+                UdpPort = udpPort
+        });
+
+        await SendUdpAndAssertNoResponseAsync(IPAddress.Loopback, udpPort, [1, 2, 3]);
+    }
+
+    [Fact]
+    public async Task UdpIpv6_AcceptsDatagramWithoutSendingResponse()
+    {
+        if (!Socket.OSSupportsIPv6)
+        {
+            return;
+        }
+
+        int udpPort = GetFreeUdpPort(AddressFamily.InterNetworkV6);
+        await using var server = await DiscardServer.StartAsync(
+            new FakeMissionControlClient(),
+            new()
+            {
+                UdpEnabled = true,
+                UdpListenAddress = IPAddress.IPv6Loopback.ToString(),
+                UdpPort = udpPort
+        });
+
+        await SendUdpAndAssertNoResponseAsync(IPAddress.IPv6Loopback, udpPort, [4, 5, 6]);
+    }
+
+    [Fact]
+    public async Task UdpDisabled_DoesNotBindUdpPort()
+    {
+        int udpPort = GetFreeUdpPort(AddressFamily.InterNetwork);
+        await using var server = await DiscardServer.StartAsync(
+            new FakeMissionControlClient(),
+            new()
+            {
+                UdpEnabled = false,
+                UdpListenAddress = IPAddress.Loopback.ToString(),
+                UdpPort = udpPort
+            });
+
+        using var udp = new UdpClient(AddressFamily.InterNetwork);
+        udp.Client.ExclusiveAddressUse = true;
+        udp.Client.Bind(new IPEndPoint(IPAddress.Loopback, udpPort));
+    }
+
+    [Fact]
+    public async Task UdpOversizedDatagram_IsDroppedWithoutSendingResponse()
+    {
+        int udpPort = GetFreeUdpPort(AddressFamily.InterNetwork);
+        await using var server = await DiscardServer.StartAsync(
+            new FakeMissionControlClient(),
+            new()
+            {
+                UdpEnabled = true,
+                UdpListenAddress = IPAddress.Loopback.ToString(),
+                UdpPort = udpPort,
+                MaxUdpDatagramBytes = 3
+        });
+
+        await SendUdpAndAssertNoResponseAsync(IPAddress.Loopback, udpPort, [1, 2, 3, 4]);
+        await server.WaitForLogAsync("Dropped oversized UDP Discard datagram");
+    }
+
+    [Fact]
+    public async Task TcpIpv6Loopback_AcceptsAndDiscardsWithoutSendingData()
+    {
+        if (!Socket.OSSupportsIPv6)
+        {
+            return;
+        }
+
+        int port = GetFreeTcpPort(IPAddress.IPv6Loopback);
+        await using var server = await DiscardServer.StartAsync(
+            new FakeMissionControlClient(),
+            new()
+            {
+                Port = port,
+                DualMode = false
+            },
+            IPAddress.IPv6Loopback);
+
+        await SendTcpAndAssertNoResponseAsync(IPAddress.IPv6Loopback, port, [7, 8, 9]);
+    }
+
+    [Fact]
+    public async Task TcpDualStack_AcceptsIpv4AndIpv6WithoutSendingData()
+    {
+        if (!Socket.OSSupportsIPv6)
+        {
+            return;
+        }
+
+        int port = GetFreeTcpPort(IPAddress.IPv6Loopback);
+        await using var server = await DiscardServer.StartAsync(
+            new FakeMissionControlClient(),
+            new()
+            {
+                Port = port,
+                DualMode = true
+            },
+            IPAddress.IPv6Any);
+
+        await SendTcpAndAssertNoResponseAsync(IPAddress.Loopback, port, [10]);
+        await SendTcpAndAssertNoResponseAsync(IPAddress.IPv6Loopback, port, [11]);
+    }
+
     private static async Task<TcpClient> ConnectAsync(int port)
     {
         var client = new TcpClient(AddressFamily.InterNetwork);
@@ -302,6 +419,69 @@ public sealed class DiscardHostTests
             client.Dispose();
             throw;
         }
+    }
+
+    private static async Task SendTcpAndAssertNoResponseAsync(
+        IPAddress address,
+        int port,
+        byte[] bytes)
+    {
+        using var client = new TcpClient(address.AddressFamily);
+        await client.ConnectAsync(address, port).WaitAsync(WaitTimeout);
+        NetworkStream stream = client.GetStream();
+        await stream.WriteAsync(bytes).AsTask().WaitAsync(WaitTimeout);
+
+        using (var noResponseSource = new CancellationTokenSource(TimeSpan.FromMilliseconds(250)))
+        {
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(async () =>
+                await stream.ReadAtLeastAsync(
+                    new byte[1],
+                    minimumBytes: 1,
+                    throwOnEndOfStream: false,
+                    noResponseSource.Token));
+        }
+
+        client.Client.Shutdown(SocketShutdown.Send);
+        int bytesRead = await stream.ReadAtLeastAsync(
+            new byte[1],
+            minimumBytes: 1,
+            throwOnEndOfStream: false).AsTask().WaitAsync(WaitTimeout);
+        Assert.Equal(0, bytesRead);
+    }
+
+    private static async Task SendUdpAndAssertNoResponseAsync(
+        IPAddress address,
+        int port,
+        byte[] bytes)
+    {
+        DateTime deadline = DateTime.UtcNow + WaitTimeout;
+
+        while (DateTime.UtcNow < deadline)
+        {
+            using var udp = new UdpClient(address.AddressFamily);
+            udp.Connect(new IPEndPoint(address, port));
+            await udp.SendAsync(bytes).AsTask().WaitAsync(WaitTimeout);
+
+            using var noResponseSource =
+                new CancellationTokenSource(TimeSpan.FromMilliseconds(250));
+
+            try
+            {
+                await udp.ReceiveAsync(noResponseSource.Token);
+                Assert.Fail("UDP Discard sent an unexpected response.");
+            }
+            catch (OperationCanceledException)
+                when (noResponseSource.IsCancellationRequested)
+            {
+                return;
+            }
+            catch (SocketException)
+            {
+                await Task.Delay(10);
+            }
+        }
+
+        Assert.Fail($"UDP listener did not accept a datagram on {address}:{port}.");
     }
 
     private static async Task SendAndWaitForCloseAsync(int port, byte[] bytes)
@@ -338,15 +518,34 @@ public sealed class DiscardHostTests
         return ((IPEndPoint)listener.LocalEndpoint).Port;
     }
 
+    private static int GetFreeTcpPort(IPAddress address)
+    {
+        using var listener = new TcpListener(address, 0);
+        listener.Start();
+        return ((IPEndPoint)listener.LocalEndpoint).Port;
+    }
+
+    private static int GetFreeUdpPort(AddressFamily addressFamily)
+    {
+        IPAddress address = addressFamily == AddressFamily.InterNetworkV6
+            ? IPAddress.IPv6Loopback
+            : IPAddress.Loopback;
+        using var udp = new UdpClient(addressFamily);
+        udp.Client.Bind(new IPEndPoint(address, 0));
+        return ((IPEndPoint)udp.Client.LocalEndPoint!).Port;
+    }
+
     private sealed class DiscardServer : IAsyncDisposable
     {
         private readonly IHost _host;
+        private readonly RecordingLoggerProvider _loggerProvider;
         private readonly object _stopGate = new();
         private Task? _stopTask;
 
-        private DiscardServer(IHost host, int port)
+        private DiscardServer(IHost host, int port, RecordingLoggerProvider loggerProvider)
         {
             _host = host;
+            _loggerProvider = loggerProvider;
             Port = port;
         }
 
@@ -354,7 +553,8 @@ public sealed class DiscardHostTests
 
         public static async Task<DiscardServer> StartAsync(
             FakeMissionControlClient missionControl,
-            HappyDiscardOptions? options = null)
+            HappyDiscardOptions? options = null,
+            IPAddress? listenAddress = null)
         {
             options ??= new HappyDiscardOptions();
             if (options.Port == 9)
@@ -362,24 +562,36 @@ public sealed class DiscardHostTests
                 options.Port = GetFreeLoopbackPort();
             }
 
-            options.ListenAddress = IPAddress.Loopback.ToString();
+            options.ListenAddress = (listenAddress ?? IPAddress.Loopback).ToString();
 
             HostApplicationBuilder builder = Host.CreateApplicationBuilder();
+            var loggerProvider = new RecordingLoggerProvider();
             builder.Logging.ClearProviders();
+            builder.Logging.SetMinimumLevel(LogLevel.Debug);
+            builder.Logging.AddProvider(loggerProvider);
             builder.Services.AddSingleton<IMissionControlClient>(missionControl);
 
             builder.Services.Configure<HappyDiscardOptions>(configured =>
             {
                 configured.ListenAddress = options.ListenAddress;
+                configured.DualMode = options.DualMode &&
+                    IPAddress.Parse(options.ListenAddress).Equals(IPAddress.IPv6Any);
                 configured.Port = options.Port;
                 configured.MaxConcurrentConnections = options.MaxConcurrentConnections;
                 configured.RequestTimeoutSeconds = options.RequestTimeoutSeconds;
                 configured.TelemetryIgnoredRemoteAddress = options.TelemetryIgnoredRemoteAddress;
                 configured.MaxBytesPerConnection = options.MaxBytesPerConnection;
+                configured.UdpEnabled = options.UdpEnabled;
+                configured.UdpListenAddress = options.UdpListenAddress;
+                configured.UdpPort = options.UdpPort;
+                configured.MaxUdpDatagramBytes = options.MaxUdpDatagramBytes;
             });
 
             builder.Services
                 .AddTcpServer<DiscardConnectionHandler, HappyDiscardOptions>();
+
+            builder.Services
+                .AddHostedService<UdpDiscardService>();
 
             builder.Services
                 .AddHostedService<DiscardLifecycleService>();
@@ -401,8 +613,11 @@ public sealed class DiscardHostTests
                 HappyDiscardEventTypes.ServiceStarted,
                 WaitTimeout);
 
-            return new DiscardServer(host, options.Port);
+            return new DiscardServer(host, options.Port, loggerProvider);
         }
+
+        public Task WaitForLogAsync(string text) =>
+            _loggerProvider.WaitForMessageAsync(text, WaitTimeout);
 
         public Task StopAsync()
         {
@@ -429,6 +644,47 @@ public sealed class DiscardHostTests
         public async ValueTask DisposeAsync()
         {
             await StopAsync();
+        }
+    }
+
+    private sealed class RecordingLoggerProvider : ILoggerProvider
+    {
+        private readonly ConcurrentQueue<string> _messages = new();
+        private readonly SemaphoreSlim _messageAdded = new(0);
+
+        public ILogger CreateLogger(string categoryName) => new RecordingLogger(this);
+
+        public void Dispose() => _messageAdded.Dispose();
+
+        public async Task WaitForMessageAsync(string text, TimeSpan timeout)
+        {
+            using var timeoutSource = new CancellationTokenSource(timeout);
+
+            while (!_messages.Any(message => message.Contains(text, StringComparison.Ordinal)))
+            {
+                await _messageAdded.WaitAsync(timeoutSource.Token);
+            }
+        }
+
+        private void Add(string message)
+        {
+            _messages.Enqueue(message);
+            _messageAdded.Release();
+        }
+
+        private sealed class RecordingLogger(RecordingLoggerProvider provider) : ILogger
+        {
+            public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
+
+            public bool IsEnabled(LogLevel logLevel) => true;
+
+            public void Log<TState>(
+                LogLevel logLevel,
+                EventId eventId,
+                TState state,
+                Exception? exception,
+                Func<TState, Exception?, string> formatter) =>
+                provider.Add(formatter(state, exception));
         }
     }
 
