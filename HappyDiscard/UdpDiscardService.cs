@@ -4,8 +4,11 @@
  * Licensed under the MIT License.
  */
 
+using HappyDiscard.Events;
 using JoyfulReaperLib.JRNet;
+using JoyfulReaperLib.MissionControl;
 using Microsoft.Extensions.Options;
+using System.Diagnostics;
 using System.Net;
 using System.Net.Sockets;
 
@@ -13,10 +16,12 @@ namespace HappyDiscard;
 
 public sealed class UdpDiscardService(
     ILogger<UdpDiscardService> logger,
+    IMissionControlClient missionControlClient,
     IOptions<HappyDiscardOptions> options)
     : BackgroundService
 {
     private const int MaximumUdpPayloadBytes = 65_507;
+    private static readonly TimeSpan TelemetryPublishTimeout = TimeSpan.FromSeconds(2);
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
@@ -40,55 +45,181 @@ public sealed class UdpDiscardService(
             MaximumUdpPayloadBytes);
 
         using UdpClient udp = CreateUdpClient(listenAddress, port);
+        string listenEndpoint = udp.Client.LocalEndPoint!.ToString()!;
+        var stopwatch = Stopwatch.StartNew();
+        long datagramsReceived = 0;
+        long datagramsDiscarded = 0;
+        long datagramsDropped = 0;
+        long bytesDiscarded = 0;
 
         logger.LogInformation(
             "HappyDiscard UDP listener started on {Endpoint}",
             udp.Client.LocalEndPoint);
 
-        while (!stoppingToken.IsCancellationRequested)
+        await PublishStartedAsync(listenEndpoint, maxDatagramBytes, stoppingToken);
+
+        try
         {
-            UdpReceiveResult received;
+            while (!stoppingToken.IsCancellationRequested)
+            {
+                UdpReceiveResult received;
 
-            try
-            {
-                received = await udp.ReceiveAsync(stoppingToken);
-            }
-            catch (OperationCanceledException)
-                when (stoppingToken.IsCancellationRequested)
-            {
-                break;
-            }
-            catch (SocketException exception)
-            {
-                logger.LogWarning(
-                    exception,
-                    "Socket error while receiving UDP Discard datagram.");
+                try
+                {
+                    received = await udp.ReceiveAsync(stoppingToken);
+                }
+                catch (OperationCanceledException)
+                    when (stoppingToken.IsCancellationRequested)
+                {
+                    break;
+                }
+                catch (SocketException exception)
+                {
+                    logger.LogWarning(
+                        exception,
+                        "Socket error while receiving UDP Discard datagram.");
 
-                continue;
-            }
-            catch (ObjectDisposedException)
-                when (stoppingToken.IsCancellationRequested)
-            {
-                break;
-            }
+                    // UdpClient does not expose a remote endpoint when ReceiveAsync fails.
+                    continue;
+                }
+                catch (ObjectDisposedException)
+                    when (stoppingToken.IsCancellationRequested)
+                {
+                    break;
+                }
 
-            if (received.Buffer.Length > maxDatagramBytes)
-            {
-                logger.LogWarning(
-                    "Dropped oversized UDP Discard datagram from {Remote}: {Bytes} bytes.",
+                datagramsReceived++;
+
+                if (received.Buffer.Length > maxDatagramBytes)
+                {
+                    datagramsDropped++;
+                    logger.LogWarning(
+                        "Dropped oversized UDP Discard datagram from {Remote}: {Bytes} bytes.",
+                        received.RemoteEndPoint,
+                        received.Buffer.Length);
+
+                    await PublishDroppedAsync(
+                        received.RemoteEndPoint.ToString(),
+                        received.Buffer.Length,
+                        "oversized",
+                        stoppingToken);
+
+                    continue;
+                }
+
+                datagramsDiscarded++;
+                bytesDiscarded += received.Buffer.Length;
+                logger.LogDebug(
+                    "Discarded UDP datagram from {Remote}: {Bytes} bytes.",
                     received.RemoteEndPoint,
                     received.Buffer.Length);
 
-                continue;
+                await PublishDiscardedAsync(
+                    received.RemoteEndPoint.ToString(),
+                    received.Buffer.Length,
+                    stoppingToken);
             }
-
-            logger.LogDebug(
-                "Discarded UDP datagram from {Remote}: {Bytes} bytes.",
-                received.RemoteEndPoint,
-                received.Buffer.Length);
         }
+        finally
+        {
+            stopwatch.Stop();
+            logger.LogInformation("HappyDiscard UDP listener stopped.");
+            await PublishStoppedAsync(
+                listenEndpoint,
+                datagramsReceived,
+                datagramsDiscarded,
+                datagramsDropped,
+                bytesDiscarded,
+                stopwatch.ElapsedMilliseconds);
+        }
+    }
 
-        logger.LogInformation("HappyDiscard UDP listener stopped.");
+    private Task PublishStartedAsync(
+        string listenEndpoint,
+        int maxDatagramBytes,
+        CancellationToken cancellationToken) =>
+        PublishSafelyAsync(
+            HappyDiscardEventTypes.UdpStarted,
+            new UdpDiscardStartedEvent(listenEndpoint, maxDatagramBytes),
+            HappyDiscardJsonContext.Default.UdpDiscardStartedEvent,
+            cancellationToken);
+
+    private Task PublishDiscardedAsync(
+        string remote,
+        int bytesDiscarded,
+        CancellationToken cancellationToken) =>
+        PublishSafelyAsync(
+            HappyDiscardEventTypes.UdpDatagramDiscarded,
+            new UdpDatagramDiscardedEvent(remote, bytesDiscarded),
+            HappyDiscardJsonContext.Default.UdpDatagramDiscardedEvent,
+            cancellationToken);
+
+    private Task PublishDroppedAsync(
+        string remote,
+        int bytesReceived,
+        string reason,
+        CancellationToken cancellationToken) =>
+        PublishSafelyAsync(
+            HappyDiscardEventTypes.UdpDatagramDropped,
+            new UdpDatagramDroppedEvent(remote, bytesReceived, reason),
+            HappyDiscardJsonContext.Default.UdpDatagramDroppedEvent,
+            cancellationToken);
+
+    private Task PublishStoppedAsync(
+        string listenEndpoint,
+        long datagramsReceived,
+        long datagramsDiscarded,
+        long datagramsDropped,
+        long bytesDiscarded,
+        long durationMilliseconds) =>
+        PublishSafelyAsync(
+            HappyDiscardEventTypes.UdpStopped,
+            new UdpDiscardStoppedEvent(
+                listenEndpoint,
+                datagramsReceived,
+                datagramsDiscarded,
+                datagramsDropped,
+                bytesDiscarded,
+                durationMilliseconds),
+            HappyDiscardJsonContext.Default.UdpDiscardStoppedEvent,
+            CancellationToken.None);
+
+    private async Task PublishSafelyAsync<TPayload>(
+        string eventType,
+        TPayload payload,
+        System.Text.Json.Serialization.Metadata.JsonTypeInfo<TPayload> payloadTypeInfo,
+        CancellationToken cancellationToken)
+    {
+        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        timeout.CancelAfter(TelemetryPublishTimeout);
+
+        try
+        {
+            bool published = await missionControlClient.TryPublishAsync(
+                eventType,
+                payload,
+                payloadTypeInfo,
+                DateTimeOffset.UtcNow,
+                correlationId: null,
+                timeout.Token);
+
+            if (!published)
+            {
+                logger.LogWarning("Mission Control did not accept {EventType}.", eventType);
+            }
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            logger.LogDebug("Mission Control publication for {EventType} was cancelled during shutdown.", eventType);
+        }
+        catch (OperationCanceledException)
+        {
+            logger.LogWarning("Mission Control publication for {EventType} timed out.", eventType);
+        }
+        catch (Exception exception)
+        {
+            logger.LogWarning(exception, "Failed to publish Mission Control event {EventType}.", eventType);
+        }
     }
 
     private static UdpClient CreateUdpClient(IPAddress address, int port)

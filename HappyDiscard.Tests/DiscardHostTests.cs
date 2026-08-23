@@ -294,8 +294,9 @@ public sealed class DiscardHostTests
     public async Task UdpIpv4_AcceptsDatagramWithoutSendingResponse()
     {
         int udpPort = GetFreeUdpPort(AddressFamily.InterNetwork);
+        var missionControl = new FakeMissionControlClient();
         await using var server = await DiscardServer.StartAsync(
-            new FakeMissionControlClient(),
+            missionControl,
             new()
             {
                 UdpEnabled = true,
@@ -303,7 +304,23 @@ public sealed class DiscardHostTests
                 UdpPort = udpPort
         });
 
+        Publication started = await missionControl.WaitForSuccessfulAsync(
+            HappyDiscardEventTypes.UdpStarted,
+            WaitTimeout);
         await SendUdpAndAssertNoResponseAsync(IPAddress.Loopback, udpPort, [1, 2, 3]);
+        Publication discarded = await missionControl.WaitForSuccessfulAsync(
+            HappyDiscardEventTypes.UdpDatagramDiscarded,
+            WaitTimeout);
+
+        var startedPayload = Assert.IsType<UdpDiscardStartedEvent>(started.Payload);
+        Assert.Equal($"{IPAddress.Loopback}:{udpPort}", startedPayload.ListenEndpoint);
+        Assert.Equal(65_507, startedPayload.MaxDatagramBytes);
+        Assert.Equal(typeof(UdpDiscardStartedEvent), started.DeclaredPayloadType);
+
+        var discardedPayload = Assert.IsType<UdpDatagramDiscardedEvent>(discarded.Payload);
+        Assert.StartsWith($"{IPAddress.Loopback}:", discardedPayload.Remote);
+        Assert.Equal(3, discardedPayload.BytesDiscarded);
+        Assert.Equal(typeof(UdpDatagramDiscardedEvent), discarded.DeclaredPayloadType);
     }
 
     [Fact]
@@ -349,8 +366,9 @@ public sealed class DiscardHostTests
     public async Task UdpOversizedDatagram_IsDroppedWithoutSendingResponse()
     {
         int udpPort = GetFreeUdpPort(AddressFamily.InterNetwork);
+        var missionControl = new FakeMissionControlClient();
         await using var server = await DiscardServer.StartAsync(
-            new FakeMissionControlClient(),
+            missionControl,
             new()
             {
                 UdpEnabled = true,
@@ -361,6 +379,84 @@ public sealed class DiscardHostTests
 
         await SendUdpAndAssertNoResponseAsync(IPAddress.Loopback, udpPort, [1, 2, 3, 4]);
         await server.WaitForLogAsync("Dropped oversized UDP Discard datagram");
+        Publication dropped = await missionControl.WaitForSuccessfulAsync(
+            HappyDiscardEventTypes.UdpDatagramDropped,
+            WaitTimeout);
+
+        var payload = Assert.IsType<UdpDatagramDroppedEvent>(dropped.Payload);
+        Assert.StartsWith($"{IPAddress.Loopback}:", payload.Remote);
+        Assert.Equal(4, payload.BytesReceived);
+        Assert.Equal("oversized", payload.Reason);
+        Assert.Equal(typeof(UdpDatagramDroppedEvent), dropped.DeclaredPayloadType);
+    }
+
+    [Fact]
+    public async Task UdpStop_PublishesAggregateTelemetry()
+    {
+        int udpPort = GetFreeUdpPort(AddressFamily.InterNetwork);
+        var missionControl = new FakeMissionControlClient();
+        await using var server = await DiscardServer.StartAsync(
+            missionControl,
+            new()
+            {
+                UdpEnabled = true,
+                UdpListenAddress = IPAddress.Loopback.ToString(),
+                UdpPort = udpPort,
+                MaxUdpDatagramBytes = 3
+            });
+
+        await missionControl.WaitForSuccessfulAsync(HappyDiscardEventTypes.UdpStarted, WaitTimeout);
+        await SendUdpAndAssertNoResponseAsync(IPAddress.Loopback, udpPort, [1, 2]);
+        await missionControl.WaitForSuccessfulAsync(
+            HappyDiscardEventTypes.UdpDatagramDiscarded,
+            WaitTimeout);
+        await SendUdpAndAssertNoResponseAsync(IPAddress.Loopback, udpPort, [1, 2, 3, 4]);
+        await missionControl.WaitForSuccessfulAsync(
+            HappyDiscardEventTypes.UdpDatagramDropped,
+            WaitTimeout);
+
+        await server.StopAsync();
+
+        Publication stopped = await missionControl.WaitForSuccessfulAsync(
+            HappyDiscardEventTypes.UdpStopped,
+            WaitTimeout);
+        var payload = Assert.IsType<UdpDiscardStoppedEvent>(stopped.Payload);
+        Assert.Equal($"{IPAddress.Loopback}:{udpPort}", payload.ListenEndpoint);
+        Assert.Equal(2, payload.DatagramsReceived);
+        Assert.Equal(1, payload.DatagramsDiscarded);
+        Assert.Equal(1, payload.DatagramsDropped);
+        Assert.Equal(2, payload.BytesDiscarded);
+        Assert.True(payload.DurationMilliseconds >= 0);
+        Assert.Equal(typeof(UdpDiscardStoppedEvent), stopped.DeclaredPayloadType);
+    }
+
+    [Fact]
+    public async Task UdpDatagramTelemetryFailure_DoesNotStopListener()
+    {
+        int udpPort = GetFreeUdpPort(AddressFamily.InterNetwork);
+        var missionControl = new FakeMissionControlClient();
+        missionControl.ThrowOn(HappyDiscardEventTypes.UdpDatagramDiscarded, times: 1);
+        await using var server = await DiscardServer.StartAsync(
+            missionControl,
+            new()
+            {
+                UdpEnabled = true,
+                UdpListenAddress = IPAddress.Loopback.ToString(),
+                UdpPort = udpPort
+            });
+
+        await missionControl.WaitForSuccessfulAsync(HappyDiscardEventTypes.UdpStarted, WaitTimeout);
+        await SendUdpAndAssertNoResponseAsync(IPAddress.Loopback, udpPort, [1]);
+        await SendUdpAndAssertNoResponseAsync(IPAddress.Loopback, udpPort, [2]);
+
+        await missionControl.WaitForAttemptsAsync(
+            HappyDiscardEventTypes.UdpDatagramDiscarded,
+            expectedCount: 2,
+            WaitTimeout);
+        await missionControl.WaitForSuccessfulCountAsync(
+            HappyDiscardEventTypes.UdpDatagramDiscarded,
+            expectedCount: 1,
+            WaitTimeout);
     }
 
     [Fact]
