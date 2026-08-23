@@ -15,4 +15,8 @@ namespace HappyDiscard.Events;
 [JsonSerializable(typeof(DiscardServiceStartedEvent))]
 [JsonSerializable(typeof(DiscardStoppedEvent))]
 [JsonSerializable(typeof(DiscardStartedEvent))]
+[JsonSerializable(typeof(UdpDiscardStartedEvent))]
+[JsonSerializable(typeof(UdpDiscardStoppedEvent))]
+[JsonSerializable(typeof(UdpDatagramDiscardedEvent))]
+[JsonSerializable(typeof(UdpDatagramDroppedEvent))]
 internal sealed partial class HappyDiscardJsonContext : JsonSerializerContext;
