@@ -11,6 +11,7 @@ using Microsoft.Extensions.Options;
 using System.Diagnostics;
 using System.Net;
 using System.Net.Sockets;
+using System.Text.Json.Serialization.Metadata;
 
 namespace HappyDiscard;
 
@@ -138,7 +139,7 @@ public sealed class UdpDiscardService(
         string listenEndpoint,
         int maxDatagramBytes,
         CancellationToken cancellationToken) =>
-        PublishSafelyAsync(
+        PublishTelemetrySafelyAsync(
             HappyDiscardEventTypes.UdpStarted,
             new UdpDiscardStartedEvent(listenEndpoint, maxDatagramBytes),
             HappyDiscardJsonContext.Default.UdpDiscardStartedEvent,
@@ -148,7 +149,7 @@ public sealed class UdpDiscardService(
         string remote,
         int bytesDiscarded,
         CancellationToken cancellationToken) =>
-        PublishSafelyAsync(
+        PublishTelemetrySafelyAsync(
             HappyDiscardEventTypes.UdpDatagramDiscarded,
             new UdpDatagramDiscardedEvent(remote, bytesDiscarded),
             HappyDiscardJsonContext.Default.UdpDatagramDiscardedEvent,
@@ -159,7 +160,7 @@ public sealed class UdpDiscardService(
         int bytesReceived,
         string reason,
         CancellationToken cancellationToken) =>
-        PublishSafelyAsync(
+        PublishTelemetrySafelyAsync(
             HappyDiscardEventTypes.UdpDatagramDropped,
             new UdpDatagramDroppedEvent(remote, bytesReceived, reason),
             HappyDiscardJsonContext.Default.UdpDatagramDroppedEvent,
@@ -172,7 +173,7 @@ public sealed class UdpDiscardService(
         long datagramsDropped,
         long bytesDiscarded,
         long durationMilliseconds) =>
-        PublishSafelyAsync(
+        PublishTelemetrySafelyAsync(
             HappyDiscardEventTypes.UdpStopped,
             new UdpDiscardStoppedEvent(
                 listenEndpoint,
@@ -184,10 +185,10 @@ public sealed class UdpDiscardService(
             HappyDiscardJsonContext.Default.UdpDiscardStoppedEvent,
             CancellationToken.None);
 
-    private async Task PublishSafelyAsync<TPayload>(
+    private async Task PublishTelemetrySafelyAsync<TPayload>(
         string eventType,
         TPayload payload,
-        System.Text.Json.Serialization.Metadata.JsonTypeInfo<TPayload> payloadTypeInfo,
+        JsonTypeInfo<TPayload> payloadTypeInfo,
         CancellationToken cancellationToken)
     {
         using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
