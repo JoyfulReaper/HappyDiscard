@@ -23,16 +23,20 @@ builder.Services
     .Validate(options => options.MaxConcurrentConnections > 0, "Discard:MaxConcurrentConnections must be positive.")
     .Validate(options => options.RequestTimeoutSeconds > 0, "Discard:RequestTimeoutSeconds must be positive.")
     .Validate(options => options.MaxBytesPerConnection > 0, "Discard:MaxBytesPerConnection must be positive.")
+    .Validate(options => !options.UdpEnabled ||
+        (options.UdpPort ?? options.Port) is > 0 and <= 65535,
+        "Discard:UdpPort must be between 1 and 65535 when UDP is enabled.")
+    .Validate(options => !options.UdpEnabled ||
+        options.MaxUdpDatagramBytes is > 0 and <= 65_507,
+        "Discard:MaxUdpDatagramBytes must be between 1 and 65507.")
     .ValidateOnStart();
 
 builder.Services.AddMissionControlClient(
     builder.Configuration.GetSection(MissionControlClientOptions.SectionName));
 
-builder.Services
-    .AddTcpServer<DiscardConnectionHandler, HappyDiscardOptions>();
-
-builder.Services
-    .AddHostedService<DiscardLifecycleService>();
+builder.Services.AddTcpServer<DiscardConnectionHandler, HappyDiscardOptions>();
+builder.Services.AddHostedService<UdpDiscardService>();
+builder.Services.AddHostedService<DiscardLifecycleService>();
 
 var host = builder.Build();
 host.Run();
