@@ -345,6 +345,71 @@ public sealed class DiscardHostTests
     }
 
     [Fact]
+    public async Task UdpDualStack_AcceptsIpv4AndIpv6WithoutSendingResponse()
+    {
+        if (!Socket.OSSupportsIPv6)
+        {
+            return;
+        }
+
+        int tcpPort = GetFreeTcpPort(IPAddress.IPv6Any);
+        int udpPort = GetFreeUdpPort(AddressFamily.InterNetworkV6);
+        var missionControl = new FakeMissionControlClient();
+        await using var server = await DiscardServer.StartAsync(
+            missionControl,
+            new()
+            {
+                Port = tcpPort,
+                DualMode = true,
+                UdpEnabled = true,
+                UdpListenAddress = IPAddress.IPv6Any.ToString(),
+                UdpPort = udpPort
+            },
+            IPAddress.IPv6Any);
+
+        await server.WaitForLogAsync("dual mode: True");
+        await SendUdpAndAssertNoResponseAsync(IPAddress.Loopback, udpPort, [7]);
+        await missionControl.WaitForSuccessfulCountAsync(
+            HappyDiscardEventTypes.UdpDatagramDiscarded,
+            expectedCount: 1,
+            WaitTimeout);
+        await SendUdpAndAssertNoResponseAsync(IPAddress.IPv6Loopback, udpPort, [8]);
+        await missionControl.WaitForSuccessfulCountAsync(
+            HappyDiscardEventTypes.UdpDatagramDiscarded,
+            expectedCount: 2,
+            WaitTimeout);
+    }
+
+    [Fact]
+    public async Task UdpDualModeWithIpv4ListenAddress_FailsStartup()
+    {
+        if (!Socket.OSSupportsIPv6)
+        {
+            return;
+        }
+
+        int tcpPort = GetFreeTcpPort(IPAddress.IPv6Any);
+        int udpPort = GetFreeUdpPort(AddressFamily.InterNetwork);
+
+        InvalidOperationException exception = await Assert.ThrowsAsync<InvalidOperationException>(
+            () => DiscardServer.StartAsync(
+                new FakeMissionControlClient(),
+                new()
+                {
+                    Port = tcpPort,
+                    DualMode = true,
+                    UdpEnabled = true,
+                    UdpListenAddress = IPAddress.Loopback.ToString(),
+                    UdpPort = udpPort
+                },
+                IPAddress.IPv6Any));
+
+        Assert.Equal(
+            "UDP dual mode requires the UDP listen address to be the IPv6 wildcard address '::'.",
+            exception.Message);
+    }
+
+    [Fact]
     public async Task UdpDisabled_DoesNotBindUdpPort()
     {
         int udpPort = GetFreeUdpPort(AddressFamily.InterNetwork);

@@ -24,6 +24,18 @@ public sealed class UdpDiscardService(
     private const int MaximumUdpPayloadBytes = 65_507;
     private static readonly TimeSpan TelemetryPublishTimeout = TimeSpan.FromSeconds(2);
 
+    public override Task StartAsync(CancellationToken cancellationToken)
+    {
+        HappyDiscardOptions value = options.Value;
+
+        if (value.UdpEnabled)
+        {
+            ValidateDualMode(GetListenAddress(value), value.DualMode);
+        }
+
+        return base.StartAsync(cancellationToken);
+    }
+
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
         HappyDiscardOptions value = options.Value;
@@ -34,10 +46,7 @@ public sealed class UdpDiscardService(
             return;
         }
 
-        IPAddress listenAddress = IPAddressUtils.ParseListenAddress(
-            string.IsNullOrWhiteSpace(value.UdpListenAddress)
-                ? value.ListenAddress
-                : value.UdpListenAddress);
+        IPAddress listenAddress = GetListenAddress(value);
 
         int port = value.UdpPort ?? value.Port;
         int maxDatagramBytes = Math.Clamp(
@@ -45,7 +54,10 @@ public sealed class UdpDiscardService(
             1,
             MaximumUdpPayloadBytes);
 
-        using UdpClient udp = CreateUdpClient(listenAddress, port);
+        using UdpClient udp = CreateUdpClient(
+            listenAddress,
+            port,
+            value.DualMode);
         string listenEndpoint = udp.Client.LocalEndPoint!.ToString()!;
         var stopwatch = Stopwatch.StartNew();
         long datagramsReceived = 0;
@@ -54,8 +66,9 @@ public sealed class UdpDiscardService(
         long bytesDiscarded = 0;
 
         logger.LogInformation(
-            "HappyDiscard UDP listener started on {Endpoint}",
-            udp.Client.LocalEndPoint);
+            "HappyDiscard UDP listener started on {Endpoint} (dual mode: {DualMode})",
+            udp.Client.LocalEndPoint,
+            value.DualMode);
 
         await PublishStartedAsync(listenEndpoint, maxDatagramBytes, stoppingToken);
 
@@ -223,18 +236,38 @@ public sealed class UdpDiscardService(
         }
     }
 
-    private static UdpClient CreateUdpClient(IPAddress address, int port)
+    private static UdpClient CreateUdpClient(
+        IPAddress address,
+        int port,
+        bool dualMode)
     {
+        ValidateDualMode(address, dualMode);
+
         var udp = new UdpClient(address.AddressFamily);
 
-        if (address.AddressFamily == AddressFamily.InterNetworkV6 &&
-            address.Equals(IPAddress.IPv6Any))
+        if (address.AddressFamily == AddressFamily.InterNetworkV6)
         {
-            udp.Client.DualMode = true;
+            udp.Client.DualMode = dualMode;
         }
 
         udp.Client.Bind(new IPEndPoint(address, port));
 
         return udp;
+    }
+
+    private static IPAddress GetListenAddress(HappyDiscardOptions options) =>
+        IPAddressUtils.ParseListenAddress(
+            string.IsNullOrWhiteSpace(options.UdpListenAddress)
+                ? options.ListenAddress
+                : options.UdpListenAddress);
+
+    private static void ValidateDualMode(IPAddress address, bool dualMode)
+    {
+        if (dualMode &&
+            !address.Equals(IPAddress.IPv6Any))
+        {
+            throw new InvalidOperationException(
+                "UDP dual mode requires the UDP listen address to be the IPv6 wildcard address '::'.");
+        }
     }
 }

@@ -43,9 +43,9 @@ Current local package dependencies:
 | --- | ---: |
 | `JoyfulReaperLib` | `0.0.11` |
 | `JoyfulReaperLib.MissionControl` | `0.0.3` |
-| `JoyfulReaperLib.TcpServer` | `0.0.4` |
+| `JoyfulReaperLib.TcpServer` | `0.0.5` |
 
-`JoyfulReaperLib.TcpServer` 0.0.4 or later is required for warning-free Native AOT publishing with .NET 10.
+`JoyfulReaperLib.TcpServer` 0.0.5 adds the `DualMode` option support used by HappyDiscard.
 
 ## Build And Test
 
@@ -95,7 +95,7 @@ HappyDiscard reads settings from the `Discard` configuration section.
 | Setting                         |     Default | Description                                                                        |
 | ------------------------------- | ----------: | ---------------------------------------------------------------------------------- |
 | `ListenAddress`                 |        `::` | Address used by the TCP listener. Use `127.0.0.1` for IPv4 loopback or `::1` for IPv6 loopback. |
-| `DualMode`                      |      `true` | Enables IPv4 and IPv6 on a TCP IPv6-any (`::`) listener.                            |
+| `DualMode`                      |      `true` | Enables IPv4 and IPv6 on TCP and UDP IPv6-any (`::`) listeners.                     |
 | `Port`                          |         `9` | TCP listening port. Port 9 is the traditional Discard Protocol port.               |
 | `MaxConcurrentConnections`      |        `64` | Maximum number of simultaneous client connections.                                 |
 | `RequestTimeoutSeconds`         |        `15` | Maximum lifetime of one connection.                                                |
@@ -110,6 +110,7 @@ Settings can also be supplied through environment variables:
 
 ```bash
 Discard__ListenAddress=0.0.0.0
+Discard__DualMode=false
 Discard__Port=9
 Discard__MaxConcurrentConnections=64
 Discard__RequestTimeoutSeconds=15
@@ -355,6 +356,7 @@ The Docker image defaults to:
 
 ```dockerfile
 ENV Discard__ListenAddress=0.0.0.0
+ENV Discard__DualMode=false
 ENV Discard__Port=9009
 ```
 
@@ -438,6 +440,7 @@ happydiscard:
     DOTNET_ENVIRONMENT: Production
 
     Discard__ListenAddress: 0.0.0.0
+    Discard__DualMode: "false"
     Discard__Port: 9009
     Discard__MaxConcurrentConnections: 64
     Discard__RequestTimeoutSeconds: 15
