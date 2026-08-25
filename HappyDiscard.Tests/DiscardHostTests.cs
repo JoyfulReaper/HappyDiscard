@@ -17,6 +17,34 @@ public sealed class DiscardHostTests
     private static readonly TimeSpan WaitTimeout = TimeSpan.FromSeconds(5);
 
     [Fact]
+    public async Task UdpStartAsync_WhenPortIsAlreadyInUse_FailsStartup()
+    {
+        int udpPort = GetFreeUdpPort(
+            AddressFamily.InterNetwork);
+
+        using var occupyingSocket =
+            new UdpClient(AddressFamily.InterNetwork);
+
+        occupyingSocket.Client.ExclusiveAddressUse = true;
+
+        occupyingSocket.Client.Bind(
+            new IPEndPoint(
+                IPAddress.Loopback,
+                udpPort));
+
+        await Assert.ThrowsAsync<SocketException>(
+            () => DiscardServer.StartAsync(
+                new FakeMissionControlClient(),
+                new HappyDiscardOptions
+                {
+                    UdpEnabled = true,
+                    UdpListenAddress =
+                        IPAddress.Loopback.ToString(),
+                    UdpPort = udpPort
+                }));
+    }
+
+    [Fact]
     public async Task StartAsync_PublishesOneServiceStartedEvent()
     {
         int port = GetFreeLoopbackPort();
@@ -302,7 +330,7 @@ public sealed class DiscardHostTests
                 UdpEnabled = true,
                 UdpListenAddress = IPAddress.Loopback.ToString(),
                 UdpPort = udpPort
-        });
+            });
 
         Publication started = await missionControl.WaitForSuccessfulAsync(
             HappyDiscardEventTypes.UdpStarted,
@@ -339,7 +367,7 @@ public sealed class DiscardHostTests
                 UdpEnabled = true,
                 UdpListenAddress = IPAddress.IPv6Loopback.ToString(),
                 UdpPort = udpPort
-        });
+            });
 
         await SendUdpAndAssertNoResponseAsync(IPAddress.IPv6Loopback, udpPort, [4, 5, 6]);
     }
@@ -440,7 +468,7 @@ public sealed class DiscardHostTests
                 UdpListenAddress = IPAddress.Loopback.ToString(),
                 UdpPort = udpPort,
                 MaxUdpDatagramBytes = 3
-        });
+            });
 
         await SendUdpAndAssertNoResponseAsync(IPAddress.Loopback, udpPort, [1, 2, 3, 4]);
         await server.WaitForLogAsync("Dropped oversized UDP Discard datagram");

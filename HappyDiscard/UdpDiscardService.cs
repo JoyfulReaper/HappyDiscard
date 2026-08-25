@@ -23,17 +23,39 @@ public sealed class UdpDiscardService(
 {
     private const int MaximumUdpPayloadBytes = 65_507;
     private static readonly TimeSpan TelemetryPublishTimeout = TimeSpan.FromSeconds(2);
+    private UdpClient? _udp;
 
-    public override Task StartAsync(CancellationToken cancellationToken)
+    public override async Task StartAsync(
+        CancellationToken cancellationToken)
     {
         HappyDiscardOptions value = options.Value;
 
         if (value.UdpEnabled)
         {
-            ValidateDualMode(GetListenAddress(value), value.DualMode);
+            IPAddress listenAddress = GetListenAddress(value);
+            int port = value.UdpPort ?? value.Port;
+
+            _udp = CreateUdpClient(
+                listenAddress,
+                port,
+                value.DualMode);
+
+            logger.LogInformation(
+                "HappyDiscard UDP socket bound to {Endpoint} (dual mode: {DualMode}).",
+                _udp.Client.LocalEndPoint,
+                value.DualMode);
         }
 
-        return base.StartAsync(cancellationToken);
+        try
+        {
+            await base.StartAsync(cancellationToken);
+        }
+        catch
+        {
+            _udp?.Dispose();
+            _udp = null;
+            throw;
+        }
     }
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
@@ -48,16 +70,14 @@ public sealed class UdpDiscardService(
 
         IPAddress listenAddress = GetListenAddress(value);
 
-        int port = value.UdpPort ?? value.Port;
         int maxDatagramBytes = Math.Clamp(
             value.MaxUdpDatagramBytes,
             1,
             MaximumUdpPayloadBytes);
 
-        using UdpClient udp = CreateUdpClient(
-            listenAddress,
-            port,
-            value.DualMode);
+        UdpClient udp = _udp
+            ?? throw new InvalidOperationException("UDP Discard listener was not initialized.");
+
         string listenEndpoint = udp.Client.LocalEndPoint!.ToString()!;
         var stopwatch = Stopwatch.StartNew();
         long datagramsReceived = 0;
@@ -136,6 +156,9 @@ public sealed class UdpDiscardService(
         }
         finally
         {
+            udp.Dispose();
+            _udp = null;
+
             stopwatch.Stop();
             logger.LogInformation("HappyDiscard UDP listener stopped.");
             await PublishStoppedAsync(
