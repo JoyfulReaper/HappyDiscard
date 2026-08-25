@@ -4,6 +4,8 @@ using JoyfulReaperLib.TcpServer;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Abstractions;
+using Microsoft.Extensions.Options;
 using System.Collections.Concurrent;
 using System.Net;
 using System.Net.Sockets;
@@ -57,6 +59,48 @@ public sealed class DiscardHostTests
         {
             missionControl.ReleaseBlockedTelemetry();
         }
+    }
+
+    [Fact]
+    public async Task UdpImmediateStop_ReleasesPort()
+    {
+        int udpPort =
+            GetFreeUdpPort(AddressFamily.InterNetwork);
+
+        using var service =
+            new UdpDiscardService(
+                NullLogger<UdpDiscardService>.Instance,
+                new FakeMissionControlClient(),
+                Options.Create(
+                    new HappyDiscardOptions
+                    {
+                        ListenAddress = "127.0.0.1",
+                        DualMode = false,
+                        UdpEnabled = true,
+                        UdpListenAddress = "127.0.0.1",
+                        UdpPort = udpPort
+                    }));
+
+        await service.StartAsync(
+            CancellationToken.None);
+
+        await service.StopAsync(
+            CancellationToken.None);
+
+        using var udp =
+            new UdpClient(
+                AddressFamily.InterNetwork);
+
+        udp.Client.ExclusiveAddressUse = true;
+
+        udp.Client.Bind(
+            new IPEndPoint(
+                IPAddress.Loopback,
+                udpPort));
+
+        Assert.Equal(
+            udpPort,
+            ((IPEndPoint)udp.Client.LocalEndPoint!).Port);
     }
 
     [Fact]
