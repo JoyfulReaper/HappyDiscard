@@ -17,6 +17,131 @@ public sealed class DiscardHostTests
     private static readonly TimeSpan WaitTimeout = TimeSpan.FromSeconds(5);
 
     [Fact]
+    public async Task UdpBlockedStartedTelemetry_DoesNotDelayDatagramProcessing()
+    {
+        int udpPort = GetFreeUdpPort(
+            AddressFamily.InterNetwork);
+
+        var missionControl = new FakeMissionControlClient();
+
+        missionControl.Block(
+            HappyDiscardEventTypes.UdpStarted);
+
+        await using var server =
+            await DiscardServer.StartAsync(
+                missionControl,
+                new()
+                {
+                    UdpEnabled = true,
+                    UdpListenAddress =
+                        IPAddress.Loopback.ToString(),
+                    UdpPort = udpPort
+                });
+
+        try
+        {
+            await missionControl.WaitForAttemptAsync(
+                HappyDiscardEventTypes.UdpStarted,
+                WaitTimeout);
+
+            await SendUdpAndAssertNoResponseAsync(
+                IPAddress.Loopback,
+                udpPort,
+                [1, 2, 3]);
+
+            await missionControl.WaitForAttemptAsync(
+                HappyDiscardEventTypes.UdpDatagramDiscarded,
+                TimeSpan.FromMilliseconds(500));
+        }
+        finally
+        {
+            missionControl.ReleaseBlockedTelemetry();
+        }
+    }
+
+    [Fact]
+    public async Task UdpBlockedDiscardedTelemetry_DoesNotDelayNextDatagram()
+    {
+        int udpPort = GetFreeUdpPort(
+            AddressFamily.InterNetwork);
+
+        var missionControl = new FakeMissionControlClient();
+
+        missionControl.Block(
+            HappyDiscardEventTypes.UdpDatagramDiscarded);
+
+        await using var server =
+            await DiscardServer.StartAsync(
+                missionControl,
+                new()
+                {
+                    UdpEnabled = true,
+                    UdpListenAddress =
+                        IPAddress.Loopback.ToString(),
+                    UdpPort = udpPort
+                });
+
+        try
+        {
+            await missionControl.WaitForSuccessfulAsync(
+                HappyDiscardEventTypes.UdpStarted,
+                WaitTimeout);
+
+            await SendUdpAndAssertNoResponseAsync(
+                IPAddress.Loopback,
+                udpPort,
+                [1]);
+
+            await missionControl.WaitForAttemptsAsync(
+                HappyDiscardEventTypes.UdpDatagramDiscarded,
+                expectedCount: 1,
+                WaitTimeout);
+
+            await SendUdpAndAssertNoResponseAsync(
+                IPAddress.Loopback,
+                udpPort,
+                [2]);
+
+            await missionControl.WaitForAttemptsAsync(
+                HappyDiscardEventTypes.UdpDatagramDiscarded,
+                expectedCount: 2,
+                TimeSpan.FromMilliseconds(500));
+        }
+        finally
+        {
+            missionControl.ReleaseBlockedTelemetry();
+        }
+    }
+
+    [Fact]
+    public async Task UdpStartAsync_WhenPortIsAlreadyInUse_FailsStartup()
+    {
+        int udpPort = GetFreeUdpPort(
+            AddressFamily.InterNetwork);
+
+        using var occupyingSocket =
+            new UdpClient(AddressFamily.InterNetwork);
+
+        occupyingSocket.Client.ExclusiveAddressUse = true;
+
+        occupyingSocket.Client.Bind(
+            new IPEndPoint(
+                IPAddress.Loopback,
+                udpPort));
+
+        await Assert.ThrowsAsync<SocketException>(
+            () => DiscardServer.StartAsync(
+                new FakeMissionControlClient(),
+                new HappyDiscardOptions
+                {
+                    UdpEnabled = true,
+                    UdpListenAddress =
+                        IPAddress.Loopback.ToString(),
+                    UdpPort = udpPort
+                }));
+    }
+
+    [Fact]
     public async Task StartAsync_PublishesOneServiceStartedEvent()
     {
         int port = GetFreeLoopbackPort();
@@ -302,7 +427,7 @@ public sealed class DiscardHostTests
                 UdpEnabled = true,
                 UdpListenAddress = IPAddress.Loopback.ToString(),
                 UdpPort = udpPort
-        });
+            });
 
         Publication started = await missionControl.WaitForSuccessfulAsync(
             HappyDiscardEventTypes.UdpStarted,
@@ -339,9 +464,74 @@ public sealed class DiscardHostTests
                 UdpEnabled = true,
                 UdpListenAddress = IPAddress.IPv6Loopback.ToString(),
                 UdpPort = udpPort
-        });
+            });
 
         await SendUdpAndAssertNoResponseAsync(IPAddress.IPv6Loopback, udpPort, [4, 5, 6]);
+    }
+
+    [Fact]
+    public async Task UdpDualStack_AcceptsIpv4AndIpv6WithoutSendingResponse()
+    {
+        if (!Socket.OSSupportsIPv6)
+        {
+            return;
+        }
+
+        int tcpPort = GetFreeTcpPort(IPAddress.IPv6Any);
+        int udpPort = GetFreeUdpPort(AddressFamily.InterNetworkV6);
+        var missionControl = new FakeMissionControlClient();
+        await using var server = await DiscardServer.StartAsync(
+            missionControl,
+            new()
+            {
+                Port = tcpPort,
+                DualMode = true,
+                UdpEnabled = true,
+                UdpListenAddress = IPAddress.IPv6Any.ToString(),
+                UdpPort = udpPort
+            },
+            IPAddress.IPv6Any);
+
+        await server.WaitForLogAsync("dual mode: True");
+        await SendUdpAndAssertNoResponseAsync(IPAddress.Loopback, udpPort, [7]);
+        await missionControl.WaitForSuccessfulCountAsync(
+            HappyDiscardEventTypes.UdpDatagramDiscarded,
+            expectedCount: 1,
+            WaitTimeout);
+        await SendUdpAndAssertNoResponseAsync(IPAddress.IPv6Loopback, udpPort, [8]);
+        await missionControl.WaitForSuccessfulCountAsync(
+            HappyDiscardEventTypes.UdpDatagramDiscarded,
+            expectedCount: 2,
+            WaitTimeout);
+    }
+
+    [Fact]
+    public async Task UdpDualModeWithIpv4ListenAddress_FailsStartup()
+    {
+        if (!Socket.OSSupportsIPv6)
+        {
+            return;
+        }
+
+        int tcpPort = GetFreeTcpPort(IPAddress.IPv6Any);
+        int udpPort = GetFreeUdpPort(AddressFamily.InterNetwork);
+
+        InvalidOperationException exception = await Assert.ThrowsAsync<InvalidOperationException>(
+            () => DiscardServer.StartAsync(
+                new FakeMissionControlClient(),
+                new()
+                {
+                    Port = tcpPort,
+                    DualMode = true,
+                    UdpEnabled = true,
+                    UdpListenAddress = IPAddress.Loopback.ToString(),
+                    UdpPort = udpPort
+                },
+                IPAddress.IPv6Any));
+
+        Assert.Equal(
+            "UDP dual mode requires the UDP listen address to be the IPv6 wildcard address '::'.",
+            exception.Message);
     }
 
     [Fact]
@@ -375,7 +565,7 @@ public sealed class DiscardHostTests
                 UdpListenAddress = IPAddress.Loopback.ToString(),
                 UdpPort = udpPort,
                 MaxUdpDatagramBytes = 3
-        });
+            });
 
         await SendUdpAndAssertNoResponseAsync(IPAddress.Loopback, udpPort, [1, 2, 3, 4]);
         await server.WaitForLogAsync("Dropped oversized UDP Discard datagram");

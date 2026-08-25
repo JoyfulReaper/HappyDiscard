@@ -29,6 +29,7 @@ WORKDIR /app
 COPY --from=build /app/publish .
 
 ENV Discard__ListenAddress=0.0.0.0
+ENV Discard__DualMode=false
 ENV Discard__Port=9009
 
 EXPOSE 9009
