@@ -17,6 +17,103 @@ public sealed class DiscardHostTests
     private static readonly TimeSpan WaitTimeout = TimeSpan.FromSeconds(5);
 
     [Fact]
+    public async Task UdpBlockedStartedTelemetry_DoesNotDelayDatagramProcessing()
+    {
+        int udpPort = GetFreeUdpPort(
+            AddressFamily.InterNetwork);
+
+        var missionControl = new FakeMissionControlClient();
+
+        missionControl.Block(
+            HappyDiscardEventTypes.UdpStarted);
+
+        await using var server =
+            await DiscardServer.StartAsync(
+                missionControl,
+                new()
+                {
+                    UdpEnabled = true,
+                    UdpListenAddress =
+                        IPAddress.Loopback.ToString(),
+                    UdpPort = udpPort
+                });
+
+        try
+        {
+            await missionControl.WaitForAttemptAsync(
+                HappyDiscardEventTypes.UdpStarted,
+                WaitTimeout);
+
+            await SendUdpAndAssertNoResponseAsync(
+                IPAddress.Loopback,
+                udpPort,
+                [1, 2, 3]);
+
+            await missionControl.WaitForAttemptAsync(
+                HappyDiscardEventTypes.UdpDatagramDiscarded,
+                TimeSpan.FromMilliseconds(500));
+        }
+        finally
+        {
+            missionControl.ReleaseBlockedTelemetry();
+        }
+    }
+
+    [Fact]
+    public async Task UdpBlockedDiscardedTelemetry_DoesNotDelayNextDatagram()
+    {
+        int udpPort = GetFreeUdpPort(
+            AddressFamily.InterNetwork);
+
+        var missionControl = new FakeMissionControlClient();
+
+        missionControl.Block(
+            HappyDiscardEventTypes.UdpDatagramDiscarded);
+
+        await using var server =
+            await DiscardServer.StartAsync(
+                missionControl,
+                new()
+                {
+                    UdpEnabled = true,
+                    UdpListenAddress =
+                        IPAddress.Loopback.ToString(),
+                    UdpPort = udpPort
+                });
+
+        try
+        {
+            await missionControl.WaitForSuccessfulAsync(
+                HappyDiscardEventTypes.UdpStarted,
+                WaitTimeout);
+
+            await SendUdpAndAssertNoResponseAsync(
+                IPAddress.Loopback,
+                udpPort,
+                [1]);
+
+            await missionControl.WaitForAttemptsAsync(
+                HappyDiscardEventTypes.UdpDatagramDiscarded,
+                expectedCount: 1,
+                WaitTimeout);
+
+            await SendUdpAndAssertNoResponseAsync(
+                IPAddress.Loopback,
+                udpPort,
+                [2]);
+
+            await missionControl.WaitForAttemptsAsync(
+                HappyDiscardEventTypes.UdpDatagramDiscarded,
+                expectedCount: 2,
+                TimeSpan.FromMilliseconds(500));
+        }
+        finally
+        {
+            missionControl.ReleaseBlockedTelemetry();
+        }
+    }
+
+    [Fact]
     public async Task UdpStartAsync_WhenPortIsAlreadyInUse_FailsStartup()
     {
         int udpPort = GetFreeUdpPort(

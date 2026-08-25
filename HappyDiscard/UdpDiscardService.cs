@@ -90,7 +90,7 @@ public sealed class UdpDiscardService(
             udp.Client.LocalEndPoint,
             value.DualMode);
 
-        await PublishStartedAsync(listenEndpoint, maxDatagramBytes, stoppingToken);
+        _ = PublishStartedAsync(listenEndpoint, maxDatagramBytes, stoppingToken);
 
         try
         {
@@ -132,11 +132,11 @@ public sealed class UdpDiscardService(
                         received.RemoteEndPoint,
                         received.Buffer.Length);
 
-                    await PublishDroppedAsync(
-                        received.RemoteEndPoint.ToString(),
-                        received.Buffer.Length,
-                        "oversized",
-                        stoppingToken);
+                    _ = PublishDroppedAsync(
+                            received.RemoteEndPoint.ToString(),
+                            received.Buffer.Length,
+                            "oversized",
+                            stoppingToken);
 
                     continue;
                 }
@@ -148,10 +148,10 @@ public sealed class UdpDiscardService(
                     received.RemoteEndPoint,
                     received.Buffer.Length);
 
-                await PublishDiscardedAsync(
-                    received.RemoteEndPoint.ToString(),
-                    received.Buffer.Length,
-                    stoppingToken);
+                _ = PublishDiscardedAsync(
+                        received.RemoteEndPoint.ToString(),
+                        received.Buffer.Length,
+                        stoppingToken);
             }
         }
         finally
