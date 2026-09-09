@@ -30,7 +30,7 @@ public sealed class DiscardConnectionHandler(
     {
         EndPoint? remote = context.RemoteEndPoint;
 
-        if (IsIgnoredTelemetrySource(remote))
+        if (IsIgnoredTelemetrySource(remote, options.Value.TelemetryIgnoredRemoteAddresses))
         {
             logger.LogDebug("Skipping telemetry for monitoring connection from {Remote}.", remote);
             _ = await ProcessAsync(context.Stream, remote, options.Value, logger, cancellationToken);
@@ -180,15 +180,24 @@ public sealed class DiscardConnectionHandler(
         }
     }
 
-    private bool IsIgnoredTelemetrySource(EndPoint? remote)
+    internal static bool IsIgnoredTelemetrySource(
+        EndPoint? remote,
+        IEnumerable<string> ignoredRemoteAddresses)
     {
-        string? remoteAddress = (remote as IPEndPoint)?.Address.MapToIPv4().ToString();
+        IPAddress? remoteAddress =
+            (remote as IPEndPoint)?
+                .Address
+                .MapToIPv4();
 
-        return !string.IsNullOrWhiteSpace(options.Value.TelemetryIgnoredRemoteAddress) &&
-            string.Equals(
-                remoteAddress,
-                options.Value.TelemetryIgnoredRemoteAddress,
-                StringComparison.OrdinalIgnoreCase);
+        if (remoteAddress is null)
+        {
+            return false;
+        }
+
+        return ignoredRemoteAddresses.Any(
+            configuredAddress =>
+                IPAddress.TryParse(configuredAddress, out IPAddress? ignoredAddress) &&
+                remoteAddress.Equals(ignoredAddress.MapToIPv4()));
     }
 
     internal static async ValueTask<DiscardProtocolResult> ProcessAsync(

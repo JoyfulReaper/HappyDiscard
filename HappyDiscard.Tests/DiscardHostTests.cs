@@ -315,7 +315,7 @@ public sealed class DiscardHostTests
         var missionControl = new FakeMissionControlClient();
         await using var server = await DiscardServer.StartAsync(missionControl, new()
         {
-            TelemetryIgnoredRemoteAddress = IPAddress.Loopback.ToString()
+            TelemetryIgnoredRemoteAddresses = [IPAddress.Loopback.ToString()]
         });
 
         await SendAndWaitForCloseAsync(server.Port, [42, 43, 44]);
@@ -328,6 +328,61 @@ public sealed class DiscardHostTests
             publication => publication.EventType is
                 HappyDiscardEventTypes.DiscardStarted or
                 HappyDiscardEventTypes.DiscardStopped);
+    }
+
+    [Fact]
+    public void EmptyTelemetryIgnoreList_DoesNotIgnoreClient()
+    {
+        var remote = new IPEndPoint(IPAddress.Loopback, 12345);
+
+        Assert.False(DiscardConnectionHandler.IsIgnoredTelemetrySource(remote, []));
+    }
+
+    [Fact]
+    public void OneMatchingTelemetryIgnoreAddress_IgnoresClient()
+    {
+        var remote = new IPEndPoint(IPAddress.Loopback, 12345);
+
+        Assert.True(DiscardConnectionHandler.IsIgnoredTelemetrySource(remote, ["127.0.0.1"]));
+    }
+
+    [Fact]
+    public void MatchingTelemetryIgnoreAddressAmongMultipleEntries_IgnoresClient()
+    {
+        var remote = new IPEndPoint(IPAddress.Loopback, 12345);
+
+        Assert.True(DiscardConnectionHandler.IsIgnoredTelemetrySource(
+            remote,
+            ["192.0.2.1", "127.0.0.1", "198.51.100.1"]));
+    }
+
+    [Fact]
+    public void NonMatchingTelemetryIgnoreAddress_DoesNotIgnoreClient()
+    {
+        var remote = new IPEndPoint(IPAddress.Loopback, 12345);
+
+        Assert.False(DiscardConnectionHandler.IsIgnoredTelemetrySource(remote, ["192.0.2.1"]));
+    }
+
+    [Fact]
+    public void InvalidTelemetryIgnoreAddress_DoesNotThrowOrIgnoreClient()
+    {
+        var remote = new IPEndPoint(IPAddress.Loopback, 12345);
+
+        bool ignored = DiscardConnectionHandler.IsIgnoredTelemetrySource(
+            remote,
+            ["not-an-ip-address"]);
+
+        Assert.False(ignored);
+    }
+
+    [Fact]
+    public void Ipv4MappedIpv6TelemetryAddress_MatchesIpv4Address()
+    {
+        var remote = new IPEndPoint(IPAddress.Parse("::ffff:127.0.0.1"), 12345);
+
+        Assert.True(DiscardConnectionHandler.IsIgnoredTelemetrySource(remote, ["127.0.0.1"]));
+        Assert.True(DiscardConnectionHandler.IsIgnoredTelemetrySource(remote, ["::ffff:127.0.0.1"]));
     }
 
     [Fact]
@@ -909,7 +964,7 @@ public sealed class DiscardHostTests
                 configured.Port = options.Port;
                 configured.MaxConcurrentConnections = options.MaxConcurrentConnections;
                 configured.RequestTimeoutSeconds = options.RequestTimeoutSeconds;
-                configured.TelemetryIgnoredRemoteAddress = options.TelemetryIgnoredRemoteAddress;
+                configured.TelemetryIgnoredRemoteAddresses = options.TelemetryIgnoredRemoteAddresses;
                 configured.MaxBytesPerConnection = options.MaxBytesPerConnection;
                 configured.UdpEnabled = options.UdpEnabled;
                 configured.UdpListenAddress = options.UdpListenAddress;

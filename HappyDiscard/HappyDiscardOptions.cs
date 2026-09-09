@@ -9,7 +9,7 @@ public sealed class HappyDiscardOptions : ITcpServerOptions
     public int Port { get; set; } = 9;
     public int MaxConcurrentConnections { get; set; } = 64;
     public int RequestTimeoutSeconds { get; set; } = 15;
-    public string? TelemetryIgnoredRemoteAddress { get; set; }
+    public string[] TelemetryIgnoredRemoteAddresses { get; set; } = [];
     public long MaxBytesPerConnection { get; set; } = 1_048_576;
 
     public bool UdpEnabled { get; set; } = false;

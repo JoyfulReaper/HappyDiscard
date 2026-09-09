@@ -77,7 +77,7 @@ HappyDiscard reads settings from the `Discard` configuration section.
     "MaxConcurrentConnections": 64,
     "RequestTimeoutSeconds": 15,
     "MaxBytesPerConnection": 1048576,
-    "TelemetryIgnoredRemoteAddress": null,
+    "TelemetryIgnoredRemoteAddresses": [],
     "UdpEnabled": false,
     "UdpListenAddress": null,
     "UdpPort": null,
@@ -100,7 +100,7 @@ HappyDiscard reads settings from the `Discard` configuration section.
 | `MaxConcurrentConnections`      |      `64` | Maximum number of simultaneous client connections.                                                                           |
 | `RequestTimeoutSeconds`         |      `15` | Maximum lifetime of one connection.                                                                                          |
 | `MaxBytesPerConnection`         | `1048576` | Maximum bytes accepted during one connection. The default is 1 MiB.                                                          |
-| `TelemetryIgnoredRemoteAddress` |    `null` | Optional monitor IP whose TCP Discard sessions are processed normally but excluded from Mission Control lifecycle telemetry. |
+| `TelemetryIgnoredRemoteAddresses` |      `[]` | Optional monitor IPs whose TCP Discard sessions are processed normally but excluded from Mission Control lifecycle telemetry. |
 | `UdpEnabled`                    |   `false` | Enables the optional UDP Discard listener. Keep it disabled unless explicitly needed.                                        |
 | `UdpListenAddress`              |    `null` | UDP listening address. When unset, `ListenAddress` is used.                                                                  |
 | `UdpPort`                       |    `null` | UDP listening port. When unset, `Port` is used.                                                                              |
@@ -115,7 +115,7 @@ Discard__Port=9
 Discard__MaxConcurrentConnections=64
 Discard__RequestTimeoutSeconds=15
 Discard__MaxBytesPerConnection=1048576
-Discard__TelemetryIgnoredRemoteAddress=172.21.0.1
+Discard__TelemetryIgnoredRemoteAddresses__0=172.21.0.1
 Discard__UdpEnabled=false
 
 MissionControl__Enabled=true
@@ -124,7 +124,7 @@ MissionControl__ApiKey=replace-with-a-strong-random-key
 MissionControl__TimeoutMilliseconds=1000
 ```
 
-`TelemetryIgnoredRemoteAddress` suppresses TCP Mission Control session telemetry only. The TCP session is still accepted, discarded, timed out, byte-limited, and cleaned up normally. The comparison uses only the normalized remote IP address, not the source port, and IPv4-mapped IPv6 addresses are mapped to IPv4 before comparison. This is intended for Uptime Kuma or another trusted TCP monitor. Docker network gateway addresses vary by host and network, so verify the actual monitor source address before setting it.
+`TelemetryIgnoredRemoteAddresses` suppresses TCP Mission Control session telemetry only for clients whose IP appears in the array. The TCP session is still accepted, discarded, timed out, byte-limited, and cleaned up normally. The comparison uses only the normalized remote IP address, not the source port, and IPv4-mapped IPv6 addresses are mapped to IPv4 before comparison. Invalid configured entries are ignored. This is intended for Uptime Kuma or other trusted TCP monitors. Docker network gateway addresses vary by host and network, so verify the actual monitor source addresses before setting them.
 
 When UDP is enabled, `UdpListenAddress` and `UdpPort` inherit `ListenAddress` and `Port` when left unset.
 
@@ -538,7 +538,7 @@ happydiscard:
     Discard__MaxConcurrentConnections: 64
     Discard__RequestTimeoutSeconds: 15
     Discard__MaxBytesPerConnection: 1048576
-    Discard__TelemetryIgnoredRemoteAddress: "172.21.0.1"
+    Discard__TelemetryIgnoredRemoteAddresses__0: "172.21.0.1"
     Discard__UdpEnabled: "false"
 
     MissionControl__Enabled: "true"
@@ -728,7 +728,7 @@ WantedBy=multi-user.target
 * `MaxUdpDatagramBytes` limits the size of a UDP datagram accepted for discard.
 * UDP is disabled by default and should be enabled publicly only when explicitly desired.
 * Port 9 is privileged on Linux. Publish host port 9 to container port 9009; do not run HappyDiscard as root and do not add `NET_BIND_SERVICE` to the container.
-* Monitoring TCP connections can be excluded from lifecycle telemetry with `TelemetryIgnoredRemoteAddress`.
+* Monitoring TCP connections can be excluded from lifecycle telemetry with `TelemetryIgnoredRemoteAddresses`.
 * Discarded TCP and UDP payload contents are never included in telemetry.
 
 ## License
